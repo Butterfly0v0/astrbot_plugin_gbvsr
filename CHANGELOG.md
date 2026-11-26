@@ -4,6 +4,12 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [v0.2.3] - 2026-11-26
+
+### Added
+
+- `gbvsr总体胜率`：按网站 Overall win rates 表发送图片。可加「大师」只统计大师及以上
+
 ## [v0.2.2] - 2026-11-26
 
 ### Added

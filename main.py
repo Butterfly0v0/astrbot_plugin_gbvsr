@@ -37,6 +37,7 @@ COMMANDS = (
     "gbvsr解绑",
     "gbvsr排行榜",
     "gbvsr排行",
+    "gbvsr总体胜率",
     "gbvsr胜率",
     "gbvsr",
 )
@@ -179,7 +180,7 @@ def _cleanup_files(
     "astrbot_plugin_gbvsr",
     "Butterfly0v0",
     "查询 puddle.farm 上的 GBVSR 玩家段位",
-    "0.2.2",
+    "0.2.3",
 )
 class GbvsrRankPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
@@ -578,6 +579,8 @@ class GbvsrRankPlugin(Star):
                 "默认前 10，最多 50。例如 gbvsr排行 伊德 20 赛季14",
                 "gbvsr胜率 [角色] [大师]",
                 "不写角色则发送全部角色对位胜率表。例如 gbvsr胜率 伊德",
+                "gbvsr总体胜率 [大师]",
+                "按网站的总体胜率表发送图片",
                 "gbvsr帮助",
                 "",
                 "数据来自 puddle.farm，段位和立绘以该站页面为准。",
@@ -606,6 +609,9 @@ class GbvsrRankPlugin(Star):
                     yield result
             elif cmd in {"gbvsr排行", "gbvsr排行榜"}:
                 async for result in self._handle_board(event, args):
+                    yield result
+            elif cmd == "gbvsr总体胜率":
+                async for result in self._handle_overall(event, args):
                     yield result
             elif cmd == "gbvsr胜率":
                 async for result in self._handle_rates(event, args):
@@ -824,6 +830,45 @@ class GbvsrRankPlugin(Star):
             f"行对列 · {cohort_label} · 近30天排位",
             portraits,
             character_zh,
+        )
+        self._sweep_temp_files()
+        async for result in self._send_image(event, out_path):
+            yield result
+
+    async def _handle_overall(self, event: AstrMessageEvent, args: str):
+        if self._cooling_down(event):
+            yield event.plain_result("查询有点频繁，请稍后再试。")
+            return
+        _, cohort = self._parse_rate_args(args)
+        self._mark_query(event)
+        cache_key = f"overall:{cohort}"
+        cached = self._cache_get(cache_key)
+        if cached is None:
+            rows, current, sky_url = await self.client.overall_rates(cohort)
+            cached = (rows, current, sky_url)
+            self._cache_set(cache_key, cached)
+        rows, current, sky_url = cached
+        if not rows:
+            yield event.plain_result("没有读到总体胜率。")
+            return
+        cohort_label = "大师及以上" if current == "master" or cohort == "master" else "全部对局"
+        portraits = await self._images_by_url(
+            [row.portrait_url for row in rows] + [sky_url]
+        )
+        out_path = os.path.join(
+            self.card_dir,
+            f"overall_{cohort}_{int(time.time() * 1000)}.png",
+        )
+        await asyncio.to_thread(
+            render_rates,
+            rows,
+            out_path,
+            "总体胜率",
+            cohort_label,
+            portraits,
+            portraits.get(sky_url),
+            character_zh,
+            False,
         )
         self._sweep_temp_files()
         async for result in self._send_image(event, out_path):

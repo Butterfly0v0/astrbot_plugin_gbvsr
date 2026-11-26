@@ -454,6 +454,33 @@ def parse_leaderboard(page_html: str) -> list[BoardRow]:
     return rows
 
 
+def parse_overall_rates(page_html: str) -> list[RateRow]:
+    table = re.search(
+        r'<table\b[^>]*aria-label="Characters ranked by overall win rate"[^>]*>(.*?)</table>',
+        page_html,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if not table:
+        raise PuddleError("总体胜率暂时解析不了。")
+    rows: list[RateRow] = []
+    for row_html in re.findall(r"<tr\b[^>]*>(.*?)</tr>", table.group(1), re.IGNORECASE | re.DOTALL):
+        name = _row_character(row_html)
+        numbers = _row_numbers(row_html, name)
+        if not name or len(numbers) < 2:
+            continue
+        rows.append(
+            RateRow(
+                character=name,
+                win_rate=numbers[0],
+                matches=numbers[1],
+                portrait_url=_row_portrait(row_html),
+            )
+        )
+    if not rows:
+        raise PuddleError("总体胜率暂时解析不了。")
+    return rows
+
+
 def parse_matchup_page(page_html: str) -> MatchupReport:
     matchups: list[MatchupRow] = []
     overall: list[RateRow] = []
@@ -718,6 +745,12 @@ class PuddleClient:
         if not report.matchups and not report.overall:
             raise PuddleError("角色胜率暂时解析不了。")
         return report
+
+    async def overall_rates(self, cohort: str = "all") -> tuple[list[RateRow], str, str]:
+        if cohort not in {"all", "master"}:
+            cohort = "all"
+        page = await self._get_html(f"{BASE_URL}/matchups", {"cohort": cohort})
+        return parse_overall_rates(page), selected_cohort(page) or cohort, _sky_url(page)
 
     async def matchup_matrix(self, cohort: str = "all") -> MatchupMatrix:
         if cohort not in {"all", "master"}:
