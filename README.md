@@ -25,7 +25,7 @@ git clone https://github.com/Butterfly0v0/astrbot_plugin_gbvsr.git
 | `gbvsr绑定 <玩家名或ID>` | 绑定玩家 |
 | `gbvsr解绑` | 解除绑定 |
 | `gbvsr排行 [角色] [人数] [赛季N]` | 排行榜图片。默认前 10，最多 50 |
-| `gbvsr胜率 [角色] [大师]` | 角色胜率图片。不写角色则列出全部角色 |
+| `gbvsr胜率 [角色] [大师]` | 胜率图片。不写角色则发送全角色对位表 |
 | `gbvsr帮助` | 查看说明 |
 
 角色名可以用简中、常见别称或英文，例如 `伊德`、`希斯`、`Id`。段位显示为大师、白银大师、黄金大师、宗师；S++ 及以下仍按网站原文显示。
@@ -38,3 +38,7 @@ git clone https://github.com/Butterfly0v0/astrbot_plugin_gbvsr.git
 | `cache_sec` | 同一玩家的缓存时间，默认 60 秒 |
 | `cooldown_sec` | 每个用户的查询间隔，默认 5 秒。帮助和解绑不受限 |
 | `max_results` | 重名时最多列出几位玩家，默认 5 |
+
+## 更新记录
+
+见 [CHANGELOG.md](./CHANGELOG.md)。
