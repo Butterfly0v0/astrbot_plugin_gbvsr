@@ -333,17 +333,30 @@ def render_card(data: CardData, out_path: str) -> None:
     draw.text((x0, name_y), name, font=f_name, fill=TEXT)
     if data.platform:
         pill = data.platform
-        pill_w, pill_h = _text_size(draw, pill, f_small)
+        bbox = draw.textbbox((0, 0), pill, font=f_small)
+        text_w = bbox[2] - bbox[0]
+        text_h = bbox[3] - bbox[1]
+        pad_x, pad_y = _u(12), _u(6)
+        box_w, box_h = text_w + pad_x * 2, text_h + pad_y * 2
         px = x0 + _text_size(draw, name, f_name)[0] + _u(12)
-        py = name_y + _u(10)
-        if px + pill_w + _u(20) <= _u(470):
-            pill_size = (pill_w + _u(20), pill_h + _u(8))
+        name_box = draw.textbbox((0, 0), name, font=f_name)
+        name_mid = name_y + (name_box[1] + name_box[3]) / 2
+        py = int(round(name_mid - box_h / 2))
+        if px + box_w <= _u(470):
             _paste(
                 canvas,
-                _aa_rounded_rect(pill_size, _u(7), (28, 58, 84, 255)),
+                _aa_rounded_rect((box_w, box_h), _u(7), (28, 58, 84, 255)),
                 (px, py),
             )
-            draw.text((px + _u(10), py + _u(2)), pill, font=f_small, fill=TEXT)
+            draw.text(
+                (
+                    px + (box_w - text_w) / 2 - bbox[0],
+                    py + (box_h - text_h) / 2 - bbox[1],
+                ),
+                pill,
+                font=f_small,
+                fill=TEXT,
+            )
 
     rank_y = _u(108)
     text_x = x0

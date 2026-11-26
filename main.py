@@ -38,6 +38,7 @@ COMMANDS = (
     "gbvsr排行榜",
     "gbvsr排行",
     "gbvsr总体胜率",
+    "gbvsr使用率",
     "gbvsr胜率",
     "gbvsr",
 )
@@ -82,6 +83,7 @@ open_image = _card.open_image
 render_card = _card.render_card
 render_leaderboard = _board.render_leaderboard
 render_rates = _board.render_rates
+render_usage = _board.render_usage
 render_matrix = _board.render_matrix
 
 
@@ -180,7 +182,7 @@ def _cleanup_files(
     "astrbot_plugin_gbvsr",
     "Butterfly0v0",
     "查询 puddle.farm 上的 GBVSR 玩家段位",
-    "0.2.3",
+    "0.2.5",
 )
 class GbvsrRankPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
@@ -581,6 +583,8 @@ class GbvsrRankPlugin(Star):
                 "不写角色则发送全部角色对位胜率表。例如 gbvsr胜率 伊德",
                 "gbvsr总体胜率 [大师]",
                 "按网站的总体胜率表发送图片",
+                "gbvsr使用率",
+                "近 30 天排位的角色出场占比",
                 "gbvsr帮助",
                 "",
                 "数据来自 puddle.farm，段位和立绘以该站页面为准。",
@@ -612,6 +616,9 @@ class GbvsrRankPlugin(Star):
                     yield result
             elif cmd == "gbvsr总体胜率":
                 async for result in self._handle_overall(event, args):
+                    yield result
+            elif cmd == "gbvsr使用率":
+                async for result in self._handle_usage(event):
                     yield result
             elif cmd == "gbvsr胜率":
                 async for result in self._handle_rates(event, args):
@@ -829,6 +836,38 @@ class GbvsrRankPlugin(Star):
             "角色对位胜率",
             f"行对列 · {cohort_label} · 近30天排位",
             portraits,
+            character_zh,
+        )
+        self._sweep_temp_files()
+        async for result in self._send_image(event, out_path):
+            yield result
+
+    async def _handle_usage(self, event: AstrMessageEvent):
+        if self._cooling_down(event):
+            yield event.plain_result("查询有点频繁，请稍后再试。")
+            return
+        self._mark_query(event)
+        cached = self._cache_get("usage")
+        if cached is None:
+            rows, sky_url = await self.client.popularity()
+            cached = (rows, sky_url)
+            self._cache_set("usage", cached)
+        rows, sky_url = cached
+        if not rows:
+            yield event.plain_result("没有读到角色使用率。")
+            return
+        portraits = await self._images_by_url(
+            [row.portrait_url for row in rows] + [sky_url]
+        )
+        out_path = os.path.join(self.card_dir, f"usage_{int(time.time() * 1000)}.png")
+        await asyncio.to_thread(
+            render_usage,
+            rows,
+            out_path,
+            "角色使用率",
+            "近30天排位",
+            portraits,
+            portraits.get(sky_url),
             character_zh,
         )
         self._sweep_temp_files()

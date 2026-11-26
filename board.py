@@ -234,6 +234,73 @@ def render_rates(
     _finish(canvas, out_path)
 
 
+def _share_value(share: str) -> float:
+    try:
+        return float(share.replace("%", "").replace(",", "").strip())
+    except ValueError:
+        return 0.0
+
+
+def render_usage(
+    rows: list,
+    out_path: str,
+    title: str,
+    subtitle: str,
+    portraits: dict[str, Image.Image],
+    sky: Optional[Image.Image] = None,
+    character_zh=None,
+) -> None:
+    row_h = _p(44)
+    height = _p(118) + row_h * max(1, len(rows)) + _p(42)
+    canvas = _prepare(_WIDTH, height, sky)
+    y = _header(canvas, title, subtitle)
+    draw = ImageDraw.Draw(canvas)
+    name_font = _font(_p(16), _YAHEI, _SEGOE)
+    rate_font = _font(_p(16), _YAHEI_BD, _SEGOE_BD)
+    small_font = _font(_p(13), _YAHEI, _SEGOE)
+    icon = _p(32)
+    bar_w = _p(150)
+    peak = max((_share_value(row.share) for row in rows), default=0.0)
+    for index, row in enumerate(rows):
+        if index % 2 == 0:
+            draw.rectangle((_p(16), y, _WIDTH - _p(16), y + row_h - _p(4)), fill=(18, 40, 60, 210))
+        portrait = portraits.get(row.portrait_url)
+        text_x = _p(28)
+        if portrait is not None:
+            _paste(canvas, _circle(portrait, icon), (_p(24), y + _p(4)))
+            text_x = _p(64)
+        label = character_zh(row.character) if character_zh else row.character
+        draw.text(
+            (text_x, y + _p(10)),
+            _ellipsis(draw, label or "—", name_font, _p(180)),
+            font=name_font,
+            fill=TEXT,
+        )
+        bar_x = _p(280)
+        bar_y = y + _p(16)
+        draw.rounded_rectangle(
+            (bar_x, bar_y, bar_x + bar_w, bar_y + _p(10)),
+            radius=_p(5),
+            fill=(28, 52, 74, 255),
+        )
+        if peak > 0:
+            fill_w = max(0, min(bar_w, int(bar_w * _share_value(row.share) / peak)))
+            if fill_w > 0:
+                draw.rounded_rectangle(
+                    (bar_x, bar_y, bar_x + fill_w, bar_y + _p(10)),
+                    radius=_p(5),
+                    fill=GOLD,
+                )
+        share = row.share or "—"
+        draw.text((bar_x + bar_w + _p(12), y + _p(8)), share, font=rate_font, fill=GOLD)
+        detail = f"{row.appearances}场 · {row.players}人"
+        detail_w = _text_size(draw, detail, small_font)[0]
+        draw.text((_WIDTH - _p(28) - detail_w, y + _p(12)), detail, font=small_font, fill=MUTED)
+        y += row_h
+    _footer(canvas, y + _p(4))
+    _finish(canvas, out_path)
+
+
 _MATRIX_GOOD = ((214, 232, 214, 255), (28, 108, 62, 255))
 _MATRIX_BAD = ((244, 214, 214, 255), (164, 48, 58, 255))
 _MATRIX_EVEN = ((255, 255, 255, 255), (62, 66, 74, 255))

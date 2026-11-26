@@ -126,6 +126,15 @@ class RateRow:
 
 
 @dataclass
+class UsageRow:
+    character: str
+    share: str
+    appearances: str
+    players: str
+    portrait_url: str
+
+
+@dataclass
 class MatchupReport:
     character: str
     cohort: str
@@ -454,6 +463,34 @@ def parse_leaderboard(page_html: str) -> list[BoardRow]:
     return rows
 
 
+def parse_popularity(page_html: str) -> list[UsageRow]:
+    table = re.search(r"<table\b[^>]*>(.*?)</table>", page_html, re.IGNORECASE | re.DOTALL)
+    if not table:
+        raise PuddleError("角色使用率暂时解析不了。")
+    rows: list[UsageRow] = []
+    for row_html in re.findall(r"<tr\b[^>]*>(.*?)</tr>", table.group(1), re.IGNORECASE | re.DOTALL):
+        name = _row_character(row_html)
+        cells = [
+            _clean_text(cell)
+            for cell in re.findall(r"<td\b[^>]*>(.*?)</td>", row_html, re.IGNORECASE | re.DOTALL)
+        ]
+        cells = [cell for cell in cells if cell and cell != name]
+        if not name or len(cells) < 3:
+            continue
+        rows.append(
+            UsageRow(
+                character=name,
+                share=cells[0],
+                appearances=cells[1],
+                players=cells[2],
+                portrait_url=_row_portrait(row_html),
+            )
+        )
+    if not rows:
+        raise PuddleError("角色使用率暂时解析不了。")
+    return rows
+
+
 def parse_overall_rates(page_html: str) -> list[RateRow]:
     table = re.search(
         r'<table\b[^>]*aria-label="Characters ranked by overall win rate"[^>]*>(.*?)</table>',
@@ -745,6 +782,10 @@ class PuddleClient:
         if not report.matchups and not report.overall:
             raise PuddleError("角色胜率暂时解析不了。")
         return report
+
+    async def popularity(self) -> tuple[list[UsageRow], str]:
+        page = await self._get_html(f"{BASE_URL}/popularity")
+        return parse_popularity(page), _sky_url(page)
 
     async def overall_rates(self, cohort: str = "all") -> tuple[list[RateRow], str, str]:
         if cohort not in {"all", "master"}:
