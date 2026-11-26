@@ -9,8 +9,8 @@ from typing import Optional
 
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 
-# 版式按 980×452 设计，输出高度 1080，宽度按比例放大，避免再被聊天窗口放大后发糊。
-_BASE_W, _BASE_H = 980, 452
+# 高度 1080。宽度收在文字栏上，立绘从右侧伸进文字下方。
+_BASE_W, _BASE_H = 760, 452
 H = 1080
 _SCALE = H / _BASE_H
 W = round(_BASE_W * _SCALE)
@@ -50,6 +50,7 @@ class CardData:
     losses: str
     matches: str
     season: str
+    unit: str = "MP"
     art: Optional[Image.Image] = None
     rank_icon: Optional[Image.Image] = None
     sky: Optional[Image.Image] = None
@@ -114,12 +115,59 @@ def _paste(base: Image.Image, image: Image.Image, xy: tuple[int, int]) -> None:
     base.alpha_composite(piece, (dest_x, dest_y))
 
 
-def _cover_height(image: Image.Image, height: int) -> Image.Image:
-    scale = height / image.height
-    return image.resize(
-        (max(1, int(image.width * scale)), height),
+def _content_box(image: Image.Image, threshold: int = 40) -> tuple[int, int, int, int]:
+    """Opaque bounds, ignoring a thin fringe of stray pixels along the canvas edge."""
+    alpha = image.getchannel("A")
+    sample_w = 240
+    sample_h = max(1, round(image.height * sample_w / image.width))
+    sample = alpha.resize((sample_w, sample_h), Image.Resampling.BOX)
+    pixels = sample.load()
+    min_count = max(2, round(sample_w * 0.012))
+    rows = [
+        sum(pixels[x, y] > threshold for x in range(sample_w))
+        for y in range(sample_h)
+    ]
+    cols = [
+        sum(pixels[x, y] > threshold for y in range(sample_h))
+        for x in range(sample_w)
+    ]
+    ys = [index for index, count in enumerate(rows) if count >= min_count]
+    xs = [index for index, count in enumerate(cols) if count >= min_count]
+    if not xs or not ys:
+        return (0, 0, image.width, image.height)
+    pad_x = max(2, round(image.width * 0.008))
+    pad_y = max(2, round(image.height * 0.008))
+    left = max(0, round(xs[0] * image.width / sample_w) - pad_x)
+    top = max(0, round(ys[0] * image.height / sample_h) - pad_y)
+    right = min(image.width, round((xs[-1] + 1) * image.width / sample_w) + pad_x)
+    bottom = min(image.height, round((ys[-1] + 1) * image.height / sample_h) + pad_y)
+    return (left, top, right, bottom)
+
+
+def _place_art(base: Image.Image, art: Image.Image) -> None:
+    """Fit the figure to the card height and park it on the right, under the text."""
+    image = art.convert("RGBA")
+    left, top, right, bottom = _content_box(image)
+    content_w = max(1, right - left)
+    content_h = max(1, bottom - top)
+    pad_top = _u(14)
+    pad_bottom = _u(8)
+    pad_right = _u(12)
+    max_w = max(1, W - pad_right)
+    max_h = max(1, H - pad_top - pad_bottom)
+    scale = min(max_w / content_w, max_h / content_h)
+    resized = image.resize(
+        (max(1, round(image.width * scale)), max(1, round(image.height * scale))),
         Image.Resampling.LANCZOS,
     )
+    content_right = round(right * scale)
+    content_top = round(top * scale)
+    content_bottom = round(bottom * scale)
+    x = W - pad_right - content_right
+    y = H - pad_bottom - content_bottom
+    if y + content_top < pad_top:
+        y = pad_top - content_top
+    _paste(base, resized, (x, y))
 
 
 def _cover(
@@ -241,21 +289,20 @@ def render_card(data: CardData, out_path: str) -> None:
     has_sky = data.sky is not None
     if has_sky:
         _paste_sky(canvas, data.sky)
-    if data.art is not None:
-        if not has_sky:
-            glow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-            glow_draw = ImageDraw.Draw(glow)
-            glow_draw.ellipse(
-                (W - _u(520), _u(10), W + _u(40), H + _u(40)),
-                fill=(28, 78, 120, 90),
-            )
-            canvas.alpha_composite(glow.filter(ImageFilter.GaussianBlur(_u(28))))
-        art = _cover_height(data.art.convert("RGBA"), H + _u(80))
-        _paste(canvas, art, (W - art.width - _u(6), H - art.height - _u(2)))
-    if has_sky:
-        _left_scrim(canvas, _u(400), _u(800), (16, 36, 58), max_alpha=188)
     elif data.art is not None:
-        _left_scrim(canvas, _u(470), _u(620), (14, 26, 40))
+        glow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        glow_draw = ImageDraw.Draw(glow)
+        glow_draw.ellipse(
+            (W - _u(520), _u(10), W + _u(40), H + _u(40)),
+            fill=(28, 78, 120, 90),
+        )
+        canvas.alpha_composite(glow.filter(ImageFilter.GaussianBlur(_u(28))))
+    if has_sky:
+        _left_scrim(canvas, _u(400), _u(620), (16, 36, 58), max_alpha=188)
+    elif data.art is not None:
+        _left_scrim(canvas, _u(430), _u(600), (14, 26, 40))
+    if data.art is not None:
+        _place_art(canvas, data.art)
 
     draw = ImageDraw.Draw(canvas)
     draw.rectangle((0, 0, _u(5), H), fill=GOLD)
@@ -320,7 +367,8 @@ def render_card(data: CardData, out_path: str) -> None:
     mp_text = data.mp or "—"
     draw.text((x0, mp_y), mp_text, font=f_mp, fill=TEXT)
     mp_w, _ = _text_size(draw, mp_text, f_mp)
-    draw.text((x0 + mp_w + _u(10), mp_y + _u(22)), "MP", font=f_unit, fill=MUTED)
+    if data.unit and mp_text != "—":
+        draw.text((x0 + mp_w + _u(10), mp_y + _u(22)), data.unit, font=f_unit, fill=MUTED)
 
     rate_known = bool(data.win_rate) and data.win_rate != "—"
     chips = [

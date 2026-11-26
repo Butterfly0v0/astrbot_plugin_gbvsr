@@ -68,8 +68,8 @@ _NAV_RE = re.compile(
 _NAV_LINK_RE = re.compile(r"<a\b([^>]*)>(.*?)</a>", re.IGNORECASE | re.DOTALL)
 _IMG_RE = re.compile(r"<img\b([^>]*)>", re.IGNORECASE)
 _FIELD_RE = re.compile(
-    r"Character:\s*(?P<character>.*?)\s*·\s*Rank:\s*(?P<rank>.*?)\s*·\s*"
-    r"Rating:\s*(?P<mp>[\d,]+)\s*MP"
+    r"Character:\s*(?P<character>[^·]+)\s*·\s*Rank:\s*(?P<rank>[^·]+)"
+    r"(?:\s*·\s*Rating:\s*(?P<mp>[\d,]+)\s*(?P<unit>[A-Za-z]+))?"
     r"(?:\s*·\s*Global position:\s*(?P<global>#[\d,]+))?"
     r"(?:\s*·\s*Character position:\s*(?P<character_rank>#[\d,]+))?"
     r"(?:\s*·\s*Matches:\s*(?P<matches>[\d,]+))?",
@@ -97,6 +97,64 @@ class CharacterSlot:
 
 
 @dataclass
+class BoardRow:
+    position: int
+    name: str
+    platform: str
+    character: str
+    rank: str
+    mp: str
+    portrait_url: str
+    rank_icon_url: str
+
+
+@dataclass
+class MatchupRow:
+    character: str
+    matches: str
+    wins: str
+    win_rate: str
+    portrait_url: str
+
+
+@dataclass
+class RateRow:
+    character: str
+    win_rate: str
+    matches: str
+    portrait_url: str
+
+
+@dataclass
+class MatchupReport:
+    character: str
+    cohort: str
+    matchups: list[MatchupRow]
+    overall: list[RateRow]
+    sky_url: str
+
+
+@dataclass
+class MatrixSlot:
+    name: str
+    portrait_url: str
+
+
+@dataclass
+class MatrixCell:
+    rate: str
+    matches: str
+    tone: str
+
+
+@dataclass
+class MatchupMatrix:
+    columns: list[MatrixSlot]
+    rows: list[tuple[MatrixSlot, list[MatrixCell]]]
+    cohort: str
+
+
+@dataclass
 class PlayerProfile:
     player_id: str
     name: str
@@ -116,6 +174,7 @@ class PlayerProfile:
     rank_icon_url: str
     sky_url: str
     page_url: str
+    rating_unit: str = "MP"
     characters: list[CharacterSlot] = field(default_factory=list)
 
     @property
@@ -243,6 +302,8 @@ def parse_player(page_html: str, player_id: str) -> PlayerProfile:
     description = html.unescape(desc_match.group(1)) if desc_match else ""
     fields = _FIELD_RE.search(description)
     if not fields:
+        if description and "Character:" not in description:
+            raise PuddleError("没有找到这个玩家。")
         raise PuddleError("这个玩家页暂时解析不了。")
 
     h2 = _H2_RE.search(page_html)
@@ -272,6 +333,8 @@ def parse_player(page_html: str, player_id: str) -> PlayerProfile:
     season_match = _SEASON_RE.search(page_html)
     art_match = _ART_RE.search(page_html)
     rank = fields.group("rank").strip()
+    raw_mp = fields.group("mp")
+    rating_unit = (fields.group("unit") or "").upper()
     page_url = f"{BASE_URL}/player/{player_id}"
     if character_id:
         page_url = f"{page_url}?character={character_id}"
@@ -283,7 +346,8 @@ def parse_player(page_html: str, player_id: str) -> PlayerProfile:
         character=character_name,
         character_id=character_id,
         rank=rank,
-        mp=_format_mp(fields.group("mp")),
+        mp=_format_mp(raw_mp) if raw_mp else "—",
+        rating_unit=rating_unit,
         global_rank=(fields.group("global") or "—").strip(),
         character_rank=(fields.group("character_rank") or "—").strip(),
         matches=(fields.group("matches") or "").replace(",", "").strip(),
@@ -297,6 +361,213 @@ def parse_player(page_html: str, player_id: str) -> PlayerProfile:
         page_url=page_url,
         characters=characters,
     )
+
+
+def _select_block(page_html: str, name: str) -> str:
+    match = re.search(
+        rf'<select\b[^>]*name="{name}"[^>]*>(.*?)</select>',
+        page_html,
+        re.IGNORECASE | re.DOTALL,
+    )
+    return match.group(1) if match else ""
+
+
+def listed_seasons(page_html: str) -> list[str]:
+    return re.findall(r'value="(\d+)"', _select_block(page_html, "season"))
+
+
+def selected_season(page_html: str) -> str:
+    match = re.search(
+        r'value="(\d+)"[^>]*selected',
+        _select_block(page_html, "season"),
+        re.IGNORECASE,
+    )
+    return match.group(1) if match else ""
+
+
+def selected_cohort(page_html: str) -> str:
+    match = re.search(
+        r'value="([^"]*)"[^>]*selected',
+        _select_block(page_html, "cohort"),
+        re.IGNORECASE,
+    )
+    return (match.group(1) if match else "") or "all"
+
+
+def _row_portrait(row_html: str) -> str:
+    match = re.search(r'<img\b([^>]*class="portrait"[^>]*)>', row_html, re.IGNORECASE)
+    if not match:
+        return ""
+    return _portrait_url(match.group(1))
+
+
+def _row_character(row_html: str) -> str:
+    match = re.search(
+        r'class="character-name">.*?<span>([^<]+)</span>',
+        row_html,
+        re.IGNORECASE | re.DOTALL,
+    )
+    return _clean_text(match.group(1)) if match else ""
+
+
+def _row_numbers(row_html: str, character: str) -> list[str]:
+    cells = [
+        _clean_text(cell)
+        for cell in re.findall(r"<td\b[^>]*>(.*?)</td>", row_html, re.IGNORECASE | re.DOTALL)
+    ]
+    return [cell for cell in cells if cell and cell != character]
+
+
+def parse_leaderboard(page_html: str) -> list[BoardRow]:
+    rows: list[BoardRow] = []
+    for row_html in re.findall(r"<tr\b[^>]*>(.*?)</tr>", page_html, re.IGNORECASE | re.DOTALL):
+        position = re.search(r'class="position">(\d+)<', row_html)
+        link = re.search(
+            r'class="player-link"[^>]*>([^<]*)</a>',
+            row_html,
+            re.IGNORECASE,
+        )
+        if not position or not link:
+            continue
+        platform = re.search(r'class="platform">([^<]*)</span>', row_html, re.IGNORECASE)
+        rank = ""
+        rank_icon = ""
+        for attrs in _IMG_RE.findall(row_html):
+            src = _attr(attrs, "src")
+            if "rank-" in src:
+                rank_icon = absolute_url(src)
+                rank = _attr(attrs, "alt")
+                break
+        points = re.search(r'title="Master points">\s*([\d,]+)', row_html, re.IGNORECASE)
+        rows.append(
+            BoardRow(
+                position=int(position.group(1)),
+                name=_clean_text(link.group(1)),
+                platform=_clean_text(platform.group(1)) if platform else "",
+                character=_row_character(row_html),
+                rank=rank,
+                mp=points.group(1) if points else "—",
+                portrait_url=_row_portrait(row_html),
+                rank_icon_url=rank_icon,
+            )
+        )
+    return rows
+
+
+def parse_matchup_page(page_html: str) -> MatchupReport:
+    matchups: list[MatchupRow] = []
+    overall: list[RateRow] = []
+    character = ""
+    parts = re.split(r"<h2\b[^>]*>", page_html, flags=re.IGNORECASE)
+    for part in parts[1:]:
+        title_match = re.match(r"(.*?)</h2>(.*)", part, re.IGNORECASE | re.DOTALL)
+        if not title_match:
+            continue
+        title = _clean_text(title_match.group(1))
+        body = title_match.group(2)
+        folded = title.casefold()
+        if folded.endswith("matchups"):
+            character = re.sub(r"'s matchups$", "", title, flags=re.IGNORECASE).strip()
+            for row_html in re.findall(r"<tr\b[^>]*>(.*?)</tr>", body, re.IGNORECASE | re.DOTALL):
+                name = _row_character(row_html)
+                numbers = _row_numbers(row_html, name)
+                if not name or len(numbers) < 3:
+                    continue
+                matchups.append(
+                    MatchupRow(
+                        character=name,
+                        matches=numbers[0],
+                        wins=numbers[1],
+                        win_rate=numbers[2],
+                        portrait_url=_row_portrait(row_html),
+                    )
+                )
+        elif "win rate" in folded:
+            for row_html in re.findall(r"<tr\b[^>]*>(.*?)</tr>", body, re.IGNORECASE | re.DOTALL):
+                name = _row_character(row_html)
+                numbers = _row_numbers(row_html, name)
+                if not name or len(numbers) < 2:
+                    continue
+                overall.append(
+                    RateRow(
+                        character=name,
+                        win_rate=numbers[0],
+                        matches=numbers[1],
+                        portrait_url=_row_portrait(row_html),
+                    )
+                )
+    return MatchupReport(
+        character=character,
+        cohort=selected_cohort(page_html),
+        matchups=matchups,
+        overall=overall,
+        sky_url=_sky_url(page_html),
+    )
+
+
+_CELL_TITLE_RE = re.compile(
+    r":\s*([\d.]+%)\s*,\s*([\d,]+)\s+matches",
+    re.IGNORECASE,
+)
+
+
+def _matrix_slot(attrs: str, inner: str) -> MatrixSlot:
+    img = _IMG_RE.search(inner)
+    name = _attr(attrs, "title") or _clean_text(inner)
+    return MatrixSlot(
+        name=name,
+        portrait_url=_portrait_url(img.group(1)) if img else "",
+    )
+
+
+def _matrix_cell(attrs: str, inner: str) -> MatrixCell:
+    title = _attr(attrs, "title")
+    parsed = _CELL_TITLE_RE.search(title)
+    rate = parsed.group(1) if parsed else _clean_text(inner)
+    matches = parsed.group(2) if parsed else ""
+    klass = set(_attr(attrs, "class").split())
+    if "good" in klass:
+        tone = "good"
+    elif "bad" in klass:
+        tone = "bad"
+    else:
+        tone = "even"
+    return MatrixCell(rate=rate, matches=matches, tone=tone)
+
+
+def parse_matchup_matrix(page_html: str) -> MatchupMatrix:
+    table = re.search(
+        r'<table\b[^>]*class="matrix"[^>]*>(.*?)</table>',
+        page_html,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if not table:
+        raise PuddleError("角色对位表暂时解析不了。")
+    row_html = re.findall(r"<tr\b[^>]*>(.*?)</tr>", table.group(1), re.IGNORECASE | re.DOTALL)
+    if len(row_html) < 2:
+        raise PuddleError("角色对位表暂时解析不了。")
+
+    columns: list[MatrixSlot] = []
+    for attrs, inner in re.findall(r"<th\b([^>]*)>(.*?)</th>", row_html[0], re.IGNORECASE | re.DOTALL):
+        if "col" not in _attr(attrs, "scope"):
+            continue
+        columns.append(_matrix_slot(attrs, inner))
+
+    rows: list[tuple[MatrixSlot, list[MatrixCell]]] = []
+    for raw in row_html[1:]:
+        head = re.search(r"<th\b([^>]*)>(.*?)</th>", raw, re.IGNORECASE | re.DOTALL)
+        if not head:
+            continue
+        cells = [
+            _matrix_cell(attrs, inner)
+            for attrs, inner in re.findall(r"<td\b([^>]*)>(.*?)</td>", raw, re.IGNORECASE | re.DOTALL)
+        ]
+        if len(cells) != len(columns):
+            continue
+        rows.append((_matrix_slot(head.group(1), head.group(2)), cells))
+    if not columns or len(rows) != len(columns):
+        raise PuddleError("角色对位表暂时解析不了。")
+    return MatchupMatrix(columns=columns, rows=rows, cohort=selected_cohort(page_html))
 
 
 def pick_character(slots: list[CharacterSlot], query: str) -> Optional[CharacterSlot]:
@@ -404,3 +675,52 @@ class PuddleClient:
         except (aiohttp.ClientError, TimeoutError) as exc:
             logger.warning("图片会话失败: %s", exc)
             return [None] * len(urls)
+
+    async def _get_html(self, url: str, params: Optional[dict[str, str]] = None) -> str:
+        try:
+            async with aiohttp.ClientSession(
+                timeout=self._timeout(),
+                headers={"User-Agent": USER_AGENT, "Accept": "text/html"},
+            ) as session:
+                async with session.get(url, params=params or None) as resp:
+                    if resp.status >= 400:
+                        raise PuddleError(f"puddle.farm 返回了 {resp.status}。")
+                    return await resp.text()
+        except PuddleError:
+            raise
+        except (aiohttp.ClientError, TimeoutError) as exc:
+            logger.warning("页面请求失败 %s: %s", url, exc)
+            raise PuddleError("暂时连不上 puddle.farm。") from exc
+
+    async def leaderboard(
+        self, character_id: str = "", season: str = ""
+    ) -> tuple[list[BoardRow], str, str]:
+        params: dict[str, str] = {}
+        if character_id:
+            params["character"] = character_id
+        if season:
+            params["season"] = season
+        page = await self._get_html(f"{BASE_URL}/", params)
+        seasons = listed_seasons(page)
+        if season and seasons and season not in seasons:
+            shown = "、".join(f"第{item}赛季" for item in seasons)
+            raise PuddleError(f"没有第{season}赛季的排行榜。现有：{shown}。")
+        return parse_leaderboard(page), selected_season(page) or season, _sky_url(page)
+
+    async def matchups(self, character_id: str, cohort: str = "all") -> MatchupReport:
+        if cohort not in {"all", "master"}:
+            cohort = "all"
+        page = await self._get_html(
+            f"{BASE_URL}/matchups",
+            {"character": character_id, "cohort": cohort},
+        )
+        report = parse_matchup_page(page)
+        if not report.matchups and not report.overall:
+            raise PuddleError("角色胜率暂时解析不了。")
+        return report
+
+    async def matchup_matrix(self, cohort: str = "all") -> MatchupMatrix:
+        if cohort not in {"all", "master"}:
+            cohort = "all"
+        page = await self._get_html(f"{BASE_URL}/matchups", {"cohort": cohort})
+        return parse_matchup_matrix(page)

@@ -31,7 +31,17 @@ _PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 LEGACY_DATA_DIR = os.path.join(_PLUGIN_DIR, "data")
 
 # 长指令在前，避免 gbvsr 吃掉 gbvsr帮助 / gbvsr绑定。
-COMMANDS = ("gbvsr帮助", "gbvsr绑定", "gbvsr解绑", "gbvsr")
+COMMANDS = (
+    "gbvsr帮助",
+    "gbvsr绑定",
+    "gbvsr解绑",
+    "gbvsr排行榜",
+    "gbvsr排行",
+    "gbvsr胜率",
+    "gbvsr",
+)
+_BOARD_LIMIT = 50
+_SEASON_RE = re.compile(r"^(?:第)?(\d+)赛季$|^赛季(\d+)$|^season(\d+)$", re.IGNORECASE)
 _PLAYER_QUERY_RE = re.compile(r"^(\d{10,})(?:\s+(.+))?$")
 
 if _PLUGIN_DIR not in sys.path:
@@ -55,6 +65,7 @@ def _load_local_module(module_name: str):
 _client = _load_local_module("client")
 _card = _load_local_module("card")
 _names = _load_local_module("names")
+_board = _load_local_module("board")
 
 PuddleClient = _client.PuddleClient
 PuddleError = _client.PuddleError
@@ -64,9 +75,13 @@ pick_character = _client.pick_character
 character_zh = _names.character_zh
 rank_zh = _names.rank_zh
 resolve_character = _names.resolve_character
+character_id = _names.character_id
 CardData = _card.CardData
 open_image = _card.open_image
 render_card = _card.render_card
+render_leaderboard = _board.render_leaderboard
+render_rates = _board.render_rates
+render_matrix = _board.render_matrix
 
 
 def _ensure_dir(path: str) -> None:
@@ -380,6 +395,7 @@ class GbvsrRankPlugin(Star):
             rank=rank_zh(profile.rank),
             character=character_zh(profile.character),
             mp=profile.mp,
+            unit=profile.rating_unit,
             global_rank=profile.global_rank,
             character_rank=profile.character_rank,
             win_rate=profile.win_rate,
@@ -488,6 +504,10 @@ class GbvsrRankPlugin(Star):
                 "gbvsr（查询已绑定的玩家）",
                 "gbvsr绑定 <玩家名或ID>",
                 "gbvsr解绑",
+                "gbvsr排行 [角色] [人数] [赛季N]",
+                "默认前 10，最多 50。例如 gbvsr排行 伊德 20 赛季14",
+                "gbvsr胜率 [角色] [大师]",
+                "不写角色则发送全部角色对位胜率表。例如 gbvsr胜率 伊德",
                 "gbvsr帮助",
                 "",
                 "数据来自 puddle.farm，段位和立绘以该站页面为准。",
@@ -513,6 +533,12 @@ class GbvsrRankPlugin(Star):
                     yield result
             elif cmd == "gbvsr绑定":
                 async for result in self._handle_bind(event, args):
+                    yield result
+            elif cmd in {"gbvsr排行", "gbvsr排行榜"}:
+                async for result in self._handle_board(event, args):
+                    yield result
+            elif cmd == "gbvsr胜率":
+                async for result in self._handle_rates(event, args):
                     yield result
             else:
                 async for result in self._handle_query(event, args):
@@ -594,3 +620,216 @@ class GbvsrRankPlugin(Star):
             return
         async for result in self._send_card(event, profile):
             yield result
+
+    def _parse_board_args(self, args: str) -> tuple[str, str, int, bool]:
+        character_parts: list[str] = []
+        season = ""
+        limit = 10
+        clamped = False
+        for token in args.split():
+            season_match = _SEASON_RE.fullmatch(token)
+            if season_match:
+                season = next(group for group in season_match.groups() if group)
+                continue
+            if token.isdigit():
+                limit = int(token)
+                continue
+            character_parts.append(token)
+        if limit < 1:
+            limit = 1
+        if limit > _BOARD_LIMIT:
+            limit = _BOARD_LIMIT
+            clamped = True
+        return " ".join(character_parts), season, limit, clamped
+
+    def _parse_rate_args(self, args: str) -> tuple[str, str]:
+        cohort = "all"
+        parts: list[str] = []
+        for token in args.split():
+            folded = token.casefold()
+            if token in {"大师", "宗师"} or folded == "master":
+                cohort = "master"
+            elif token in {"全部", "全段"} or folded == "all":
+                cohort = "all"
+            else:
+                parts.append(token)
+        return " ".join(parts), cohort
+
+    async def _images_by_url(self, urls: list[str]) -> dict[str, Any]:
+        unique: list[str] = []
+        seen: set[str] = set()
+        for url in urls:
+            if url and url not in seen:
+                seen.add(url)
+                unique.append(url)
+        images = await self._load_images(unique)
+        return {url: image for url, image in zip(unique, images) if image is not None}
+
+    async def _send_image(self, event: AstrMessageEvent, path: str, caption: str):
+        try:
+            yield event.chain_result(
+                [Comp.Image.fromFileSystem(path), Comp.Plain(caption)]
+            )
+        except Exception:
+            logger.exception("chain 发图失败，回退 image_result")
+            yield event.image_result(path)
+            yield event.plain_result(caption)
+
+    async def _handle_board(self, event: AstrMessageEvent, args: str):
+        if self._cooling_down(event):
+            yield event.plain_result("查询有点频繁，请稍后再试。")
+            return
+        character_query, season, limit, clamped = self._parse_board_args(args)
+        character_key = ""
+        character_label = "全角色"
+        if character_query:
+            english = resolve_character(character_query)
+            character_key = character_id(character_query) or ""
+            if not english or not character_key:
+                yield event.plain_result(f"没有找到角色「{character_query}」。")
+                return
+            character_label = character_zh(english)
+        self._mark_query(event)
+        cache_key = f"board:{character_key}:{season}"
+        cached = self._cache_get(cache_key)
+        if cached is None:
+            rows, current_season, sky_url = await self.client.leaderboard(character_key, season)
+            cached = (rows, current_season, sky_url)
+            self._cache_set(cache_key, cached)
+        rows, current_season, sky_url = cached
+        shown = list(rows[:limit])
+        if not shown:
+            yield event.plain_result("这个排行榜还没有玩家。")
+            return
+        portraits = await self._images_by_url(
+            [row.portrait_url for row in shown] + [sky_url]
+        )
+        icons = await self._images_by_url([row.rank_icon_url for row in shown])
+        season_label = f"第{current_season}赛季" if current_season else "当前赛季"
+        title = "排行榜"
+        subtitle = f"{character_label} · {season_label} · 前{len(shown)}"
+        out_path = os.path.join(
+            self.card_dir,
+            f"board_{character_key or 'all'}_{current_season or 'now'}_{limit}_{int(time.time() * 1000)}.png",
+        )
+        await asyncio.to_thread(
+            render_leaderboard,
+            shown,
+            out_path,
+            title,
+            subtitle,
+            portraits,
+            icons,
+            portraits.get(sky_url),
+            character_zh,
+            rank_zh,
+        )
+        _cleanup_cards(self.card_dir)
+        params = []
+        if current_season:
+            params.append(f"season={current_season}")
+        if character_key:
+            params.append(f"character={character_key}")
+        page = "https://puddle.farm/gbvsr/"
+        if params:
+            page = page + "?" + "&".join(params)
+        if clamped:
+            page = f"最多显示前 {_BOARD_LIMIT} 名。\n{page}"
+        async for result in self._send_image(event, out_path, page):
+            yield result
+
+    async def _handle_matrix(self, event: AstrMessageEvent, cohort: str):
+        cache_key = f"matrix:{cohort}"
+        matrix = self._cache_get(cache_key)
+        if matrix is None:
+            matrix = await self.client.matchup_matrix(cohort)
+            self._cache_set(cache_key, matrix)
+        cohort_label = "大师及以上" if matrix.cohort == "master" or cohort == "master" else "全部对局"
+        portraits = await self._images_by_url(
+            [slot.portrait_url for slot in matrix.columns]
+            + [slot.portrait_url for slot, _cells in matrix.rows]
+        )
+        out_path = os.path.join(
+            self.card_dir,
+            f"matrix_{cohort}_{int(time.time() * 1000)}.png",
+        )
+        await asyncio.to_thread(
+            render_matrix,
+            matrix,
+            out_path,
+            "角色对位胜率",
+            f"行对列 · {cohort_label} · 近30天排位",
+            portraits,
+            character_zh,
+        )
+        _cleanup_cards(self.card_dir)
+        page = f"https://puddle.farm/gbvsr/matchups?cohort={cohort}"
+        async for result in self._send_image(event, out_path, page):
+            yield result
+
+    async def _handle_rates(self, event: AstrMessageEvent, args: str):
+        if self._cooling_down(event):
+            yield event.plain_result("查询有点频繁，请稍后再试。")
+            return
+        character_query, cohort = self._parse_rate_args(args)
+        english = ""
+        character_key = "0"
+        if character_query:
+            english = resolve_character(character_query) or ""
+            character_key = character_id(character_query) or ""
+            if not english or not character_key:
+                yield event.plain_result(f"没有找到角色「{character_query}」。")
+                return
+        self._mark_query(event)
+        if not character_query:
+            async for result in self._handle_matrix(event, cohort):
+                yield result
+            return
+        cache_key = f"rates:{character_key}:{cohort}"
+        report = self._cache_get(cache_key)
+        if report is None:
+            report = await self.client.matchups(character_key, cohort)
+            self._cache_set(cache_key, report)
+        cohort_label = "大师及以上" if report.cohort == "master" or cohort == "master" else "全部对局"
+        rows = sorted(report.matchups, key=lambda item: _rate_value(item.win_rate), reverse=True)
+        overall = next(
+            (item for item in report.overall if item.character.casefold() == english.casefold()),
+            None,
+        )
+        summary = ""
+        if overall:
+            summary = f"总胜率 {overall.win_rate} · {overall.matches}场 · "
+        title = f"{character_zh(english)} 对位胜率"
+        subtitle = f"{summary}{cohort_label}"
+        if not rows:
+            yield event.plain_result("没有读到胜率数据。")
+            return
+        portraits = await self._images_by_url(
+            [row.portrait_url for row in rows] + [report.sky_url]
+        )
+        out_path = os.path.join(
+            self.card_dir,
+            f"rates_{character_key}_{cohort}_{int(time.time() * 1000)}.png",
+        )
+        await asyncio.to_thread(
+            render_rates,
+            rows,
+            out_path,
+            title,
+            subtitle,
+            portraits,
+            portraits.get(report.sky_url),
+            character_zh,
+            True,
+        )
+        _cleanup_cards(self.card_dir)
+        page = f"https://puddle.farm/gbvsr/matchups?character={character_key}&cohort={cohort}"
+        async for result in self._send_image(event, out_path, page):
+            yield result
+
+
+def _rate_value(rate: str) -> float:
+    try:
+        return float(rate.replace("%", "").replace(",", "").strip())
+    except ValueError:
+        return -1.0
