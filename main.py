@@ -179,7 +179,7 @@ def _cleanup_files(
     "astrbot_plugin_gbvsr",
     "Butterfly0v0",
     "查询 puddle.farm 上的 GBVSR 玩家段位",
-    "0.2.1",
+    "0.2.2",
 )
 class GbvsrRankPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):

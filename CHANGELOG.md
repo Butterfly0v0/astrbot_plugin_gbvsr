@@ -4,6 +4,12 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [v0.2.2] - 2026-11-26
+
+### Added
+
+- 姬塔可以使用别称「吉他」「吉塔」
+
 ## [v0.2.1] - 2026-11-26
 
 ### Added
