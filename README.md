@@ -38,6 +38,8 @@ git clone https://github.com/Butterfly0v0/astrbot_plugin_gbvsr.git
 | `cache_sec` | 同一玩家的缓存时间，默认 60 秒 |
 | `cooldown_sec` | 每个用户的查询间隔，默认 5 秒。帮助和解绑不受限 |
 | `max_results` | 重名时最多列出几位玩家，默认 5 |
+| `card_keep_hours` | 生成的图片保留多久，默认 24 小时，并且最多留 30 张 |
+| `image_keep_days` | 下载的立绘和头像多久没用就删，默认 7 天 |
 
 ## 更新记录
 

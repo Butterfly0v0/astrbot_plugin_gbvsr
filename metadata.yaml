@@ -2,7 +2,7 @@ name: astrbot_plugin_gbvsr
 display_name: GBVSR 段位查询
 desc: 通过 puddle.farm 查询 GBVSR 玩家段位，并发送带立绘的资料卡。
 short_desc: 玩家名或 ID → 段位资料卡
-version: v0.2.0
+version: v0.2.1
 author: Butterfly0v0
 repo: https://github.com/Butterfly0v0/astrbot_plugin_gbvsr
 support_platforms:

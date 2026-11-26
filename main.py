@@ -137,30 +137,49 @@ def _choose_exact(hits: list[SearchHit], query: str) -> Optional[SearchHit]:
     return None
 
 
-def _cleanup_cards(cache_dir: str, keep_latest: int = 30, max_age_sec: int = 86400) -> None:
+_CARD_KEEP = 30
+_CLEANUP_INTERVAL_SEC = 6 * 3600
+_IMAGE_SUFFIXES = {".webp", ".png", ".jpg", ".jpeg", ".img"}
+
+
+def _cleanup_files(
+    cache_dir: str,
+    max_age_sec: int,
+    keep_latest: int = 0,
+    suffixes: Optional[set[str]] = None,
+) -> int:
     try:
         entries = []
         for name in os.listdir(cache_dir):
             path = os.path.join(cache_dir, name)
-            if os.path.isfile(path) and name.lower().endswith(".png"):
-                entries.append((os.path.getmtime(path), path))
-        entries.sort(reverse=True)
-        now = time.time()
-        for index, (mtime, path) in enumerate(entries):
-            if index >= keep_latest or now - mtime > max_age_sec:
-                try:
-                    os.remove(path)
-                except OSError:
-                    pass
+            if not os.path.isfile(path):
+                continue
+            if suffixes is not None and os.path.splitext(name)[1].lower() not in suffixes:
+                continue
+            entries.append((os.path.getmtime(path), path))
     except OSError:
-        pass
+        return 0
+    entries.sort(reverse=True)
+    now = time.time()
+    removed = 0
+    for index, (mtime, path) in enumerate(entries):
+        expired = max_age_sec >= 0 and now - mtime > max_age_sec
+        overflow = keep_latest > 0 and index >= keep_latest
+        if not expired and not overflow:
+            continue
+        try:
+            os.remove(path)
+            removed += 1
+        except OSError:
+            pass
+    return removed
 
 
 @register(
     "astrbot_plugin_gbvsr",
     "Butterfly0v0",
     "查询 puddle.farm 上的 GBVSR 玩家段位",
-    "0.1.0",
+    "0.2.1",
 )
 class GbvsrRankPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
@@ -175,7 +194,33 @@ class GbvsrRankPlugin(Star):
         _ensure_dir(self.card_dir)
         self._cache: dict[str, tuple[float, Any]] = {}
         self._last_query: dict[str, float] = {}
+        self._cleanup_task: Optional[asyncio.Task] = None
         self._reload_settings()
+
+    async def initialize(self) -> None:
+        self._cleanup_task = asyncio.create_task(self._cleanup_loop())
+
+    async def terminate(self) -> None:
+        task = self._cleanup_task
+        self._cleanup_task = None
+        if task is None:
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    async def _cleanup_loop(self) -> None:
+        try:
+            while True:
+                try:
+                    await asyncio.to_thread(self._sweep_temp_files)
+                except Exception:
+                    logger.exception("清理临时文件失败")
+                await asyncio.sleep(_CLEANUP_INTERVAL_SEC)
+        except asyncio.CancelledError:
+            return
 
     def _cfg_int(self, key: str, default: int) -> int:
         if not self.config:
@@ -194,7 +239,28 @@ class GbvsrRankPlugin(Star):
         self.cache_sec = max(0, self._cfg_int("cache_sec", 60))
         self.cooldown_sec = max(0, self._cfg_int("cooldown_sec", 5))
         self.max_results = max(1, self._cfg_int("max_results", 5))
+        self.card_keep_sec = max(1, self._cfg_int("card_keep_hours", 24)) * 3600
+        self.image_keep_sec = max(1, self._cfg_int("image_keep_days", 7)) * 86400
         self.client = PuddleClient(self.timeout_sec)
+
+    def _sweep_temp_files(self) -> None:
+        removed_cards = _cleanup_files(
+            self.card_dir,
+            max_age_sec=self.card_keep_sec,
+            keep_latest=_CARD_KEEP,
+            suffixes={".png"},
+        )
+        removed_images = _cleanup_files(
+            self.image_dir,
+            max_age_sec=self.image_keep_sec,
+            suffixes=_IMAGE_SUFFIXES,
+        )
+        if removed_cards or removed_images:
+            logger.info(
+                "已清理临时文件：资料卡 %s 张，缓存图 %s 张",
+                removed_cards,
+                removed_images,
+            )
 
     def _cache_get(self, key: str) -> Any:
         item = self._cache.get(key)
@@ -341,7 +407,12 @@ class GbvsrRankPlugin(Star):
             return None
         try:
             with open(path, "rb") as handle:
-                return open_image(handle.read())
+                image = open_image(handle.read())
+            try:
+                os.utime(path, None)
+            except OSError:
+                pass
+            return image
         except Exception:
             logger.info("缓存图片损坏: %s", path)
             return None
@@ -409,7 +480,7 @@ class GbvsrRankPlugin(Star):
             alts=alt_images,
         )
         await asyncio.to_thread(render_card, card, out_path)
-        _cleanup_cards(self.card_dir)
+        self._sweep_temp_files()
         return out_path
 
     def _hits_text(self, hits: list[SearchHit]) -> str:
@@ -481,17 +552,16 @@ class GbvsrRankPlugin(Star):
 
     async def _send_card(self, event: AstrMessageEvent, profile: PlayerProfile, prefix: str = ""):
         path = await self._build_card(profile)
-        caption = profile.page_url
+        chain = [Comp.Image.fromFileSystem(path)]
         if prefix:
-            caption = f"{prefix}\n{caption}"
+            chain.append(Comp.Plain(prefix))
         try:
-            yield event.chain_result(
-                [Comp.Image.fromFileSystem(path), Comp.Plain(caption)]
-            )
+            yield event.chain_result(chain)
         except Exception:
             logger.exception("chain 发图失败，回退 image_result")
             yield event.image_result(path)
-            yield event.plain_result(caption)
+            if prefix:
+                yield event.plain_result(prefix)
 
     def _help_text(self) -> str:
         return "\n".join(
@@ -665,15 +735,17 @@ class GbvsrRankPlugin(Star):
         images = await self._load_images(unique)
         return {url: image for url, image in zip(unique, images) if image is not None}
 
-    async def _send_image(self, event: AstrMessageEvent, path: str, caption: str):
+    async def _send_image(self, event: AstrMessageEvent, path: str, note: str = ""):
+        chain = [Comp.Image.fromFileSystem(path)]
+        if note:
+            chain.append(Comp.Plain(note))
         try:
-            yield event.chain_result(
-                [Comp.Image.fromFileSystem(path), Comp.Plain(caption)]
-            )
+            yield event.chain_result(chain)
         except Exception:
             logger.exception("chain 发图失败，回退 image_result")
             yield event.image_result(path)
-            yield event.plain_result(caption)
+            if note:
+                yield event.plain_result(note)
 
     async def _handle_board(self, event: AstrMessageEvent, args: str):
         if self._cooling_down(event):
@@ -724,18 +796,9 @@ class GbvsrRankPlugin(Star):
             character_zh,
             rank_zh,
         )
-        _cleanup_cards(self.card_dir)
-        params = []
-        if current_season:
-            params.append(f"season={current_season}")
-        if character_key:
-            params.append(f"character={character_key}")
-        page = "https://puddle.farm/gbvsr/"
-        if params:
-            page = page + "?" + "&".join(params)
-        if clamped:
-            page = f"最多显示前 {_BOARD_LIMIT} 名。\n{page}"
-        async for result in self._send_image(event, out_path, page):
+        self._sweep_temp_files()
+        note = f"最多显示前 {_BOARD_LIMIT} 名。" if clamped else ""
+        async for result in self._send_image(event, out_path, note):
             yield result
 
     async def _handle_matrix(self, event: AstrMessageEvent, cohort: str):
@@ -762,9 +825,8 @@ class GbvsrRankPlugin(Star):
             portraits,
             character_zh,
         )
-        _cleanup_cards(self.card_dir)
-        page = f"https://puddle.farm/gbvsr/matchups?cohort={cohort}"
-        async for result in self._send_image(event, out_path, page):
+        self._sweep_temp_files()
+        async for result in self._send_image(event, out_path):
             yield result
 
     async def _handle_rates(self, event: AstrMessageEvent, args: str):
@@ -822,9 +884,8 @@ class GbvsrRankPlugin(Star):
             character_zh,
             True,
         )
-        _cleanup_cards(self.card_dir)
-        page = f"https://puddle.farm/gbvsr/matchups?character={character_key}&cohort={cohort}"
-        async for result in self._send_image(event, out_path, page):
+        self._sweep_temp_files()
+        async for result in self._send_image(event, out_path):
             yield result
 
 

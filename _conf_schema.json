@@ -23,5 +23,17 @@
     "type": "int",
     "default": 5,
     "hint": "搜索到多名玩家时，消息里最多展示几条"
+  },
+  "card_keep_hours": {
+    "description": "资料卡保留（小时）",
+    "type": "int",
+    "default": 24,
+    "hint": "生成的资料卡、排行榜和胜率图超过这个时间就删除，并且最多留 30 张"
+  },
+  "image_keep_days": {
+    "description": "缓存图保留（天）",
+    "type": "int",
+    "default": 7,
+    "hint": "从网站下载的立绘和头像，这么久没再用到就删除"
   }
 }
