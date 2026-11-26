@@ -1,0 +1,27 @@
+{
+  "request_timeout_sec": {
+    "description": "请求超时（秒）",
+    "type": "int",
+    "default": 20,
+    "hint": "访问 puddle.farm 的超时时间",
+    "obvious_hint": true
+  },
+  "cache_sec": {
+    "description": "结果缓存（秒）",
+    "type": "int",
+    "default": 60,
+    "hint": "同一玩家在这段时间内不重复请求网页"
+  },
+  "cooldown_sec": {
+    "description": "查询冷却（秒）",
+    "type": "int",
+    "default": 5,
+    "hint": "每个用户两次查询之间的最短间隔。帮助、解绑不受限"
+  },
+  "max_results": {
+    "description": "重名时最多列出",
+    "type": "int",
+    "default": 5,
+    "hint": "搜索到多名玩家时，消息里最多展示几条"
+  }
+}
