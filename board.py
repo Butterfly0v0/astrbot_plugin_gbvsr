@@ -26,6 +26,7 @@ from card import (  # noqa: E402
     _aa_disc,
     _circle,
     _font,
+    font_for,
     _paste,
     _paste_sky,
     _text_size,
@@ -91,10 +92,17 @@ def _header(canvas: Image.Image, title: str, subtitle: str) -> int:
     return _p(118)
 
 
-def _footer(canvas: Image.Image, y: int) -> None:
+def _footer(canvas: Image.Image, y: int, updated: str = "") -> None:
     draw = ImageDraw.Draw(canvas)
-    font = _font(_p(12), _SEGOE, _YAHEI)
-    draw.text((_p(28), y), "puddle.farm/gbvsr", font=font, fill=(110, 132, 150, 255))
+    font = _font(_p(12), _YAHEI, _SEGOE)
+    ink = (110, 132, 150, 255)
+    if updated:
+        draw.text((_p(28), y), f"数据更新 {updated}", font=font, fill=ink)
+        credit = "puddle.farm/gbvsr"
+        credit_w = _text_size(draw, credit, font)[0]
+        draw.text((_WIDTH - _p(28) - credit_w, y), credit, font=font, fill=ink)
+        return
+    draw.text((_p(28), y), "puddle.farm/gbvsr", font=font, fill=ink)
 
 
 def render_leaderboard(
@@ -107,13 +115,14 @@ def render_leaderboard(
     sky: Optional[Image.Image] = None,
     character_zh=None,
     rank_zh=None,
+    updated: str = "",
 ) -> None:
     row_h = _p(52)
     height = _p(118) + row_h * max(1, len(rows)) + _p(42)
     canvas = _prepare(_WIDTH, height, sky)
     y = _header(canvas, title, subtitle)
     draw = ImageDraw.Draw(canvas)
-    name_font = _font(_p(16), _YAHEI_BD, _SEGOE_BD)
+    num_font = _font(_p(16), _SEGOE_BD, _YAHEI_BD)
     body_font = _font(_p(15), _YAHEI, _SEGOE)
     small_font = _font(_p(12), _YAHEI, _SEGOE)
     pos_font = _font(_p(18), _SEGOE_BD, _YAHEI_BD)
@@ -124,6 +133,7 @@ def render_leaderboard(
         pos = str(row.position)
         pos_color = GOLD if row.position <= 3 else TEXT
         draw.text((_p(28), y + _p(12)), pos, font=pos_font, fill=pos_color)
+        name_font = font_for(_p(16), row.name or "", bold=True)
         name = _ellipsis(draw, row.name or "—", name_font, _p(250))
         draw.text((_p(78), y + _p(6)), name, font=name_font, fill=TEXT)
         platform = row.platform or ""
@@ -158,13 +168,13 @@ def render_leaderboard(
             fill=GOLD,
         )
         mp = row.mp or "—"
-        mp_w = _text_size(draw, mp, name_font)[0]
-        draw.text((_WIDTH - _p(28) - mp_w, y + _p(8)), mp, font=name_font, fill=TEXT)
+        mp_w = _text_size(draw, mp, num_font)[0]
+        draw.text((_WIDTH - _p(28) - mp_w, y + _p(8)), mp, font=num_font, fill=TEXT)
         unit = "MP"
         unit_w = _text_size(draw, unit, small_font)[0]
         draw.text((_WIDTH - _p(28) - unit_w, y + _p(28)), unit, font=small_font, fill=MUTED)
         y += row_h
-    _footer(canvas, y + _p(4))
+    _footer(canvas, y + _p(4), updated)
     _finish(canvas, out_path)
 
 
@@ -177,6 +187,7 @@ def render_rates(
     sky: Optional[Image.Image] = None,
     character_zh=None,
     show_wins: bool = False,
+    updated: str = "",
 ) -> None:
     row_h = _p(44)
     height = _p(118) + row_h * max(1, len(rows)) + _p(42)
@@ -230,7 +241,7 @@ def render_rates(
         detail_w = _text_size(draw, detail, small_font)[0]
         draw.text((_WIDTH - _p(28) - detail_w, y + _p(12)), detail, font=small_font, fill=MUTED)
         y += row_h
-    _footer(canvas, y + _p(4))
+    _footer(canvas, y + _p(4), updated)
     _finish(canvas, out_path)
 
 
@@ -249,6 +260,7 @@ def render_usage(
     portraits: dict[str, Image.Image],
     sky: Optional[Image.Image] = None,
     character_zh=None,
+    updated: str = "",
 ) -> None:
     row_h = _p(44)
     height = _p(118) + row_h * max(1, len(rows)) + _p(42)
@@ -297,7 +309,7 @@ def render_usage(
         detail_w = _text_size(draw, detail, small_font)[0]
         draw.text((_WIDTH - _p(28) - detail_w, y + _p(12)), detail, font=small_font, fill=MUTED)
         y += row_h
-    _footer(canvas, y + _p(4))
+    _footer(canvas, y + _p(4), updated)
     _finish(canvas, out_path)
 
 
@@ -326,6 +338,7 @@ def render_matrix(
     subtitle: str,
     portraits: dict[str, Image.Image],
     character_zh=None,
+    updated: str = "",
 ) -> None:
     columns = matrix.columns
     count = len(columns)
@@ -388,5 +401,115 @@ def render_matrix(
                 font=rate_font,
                 fill=ink,
             )
-    draw.text((pad, height - 34), "puddle.farm/gbvsr", font=sub_font, fill=(120, 112, 98, 255))
+    ink = (120, 112, 98, 255)
+    if updated:
+        draw.text((pad, height - 34), f"数据更新 {updated}", font=sub_font, fill=ink)
+        credit = "puddle.farm/gbvsr"
+        credit_w = _text_size(draw, credit, sub_font)[0]
+        draw.text((width - pad - credit_w, height - 34), credit, font=sub_font, fill=ink)
+    else:
+        draw.text((pad, height - 34), "puddle.farm/gbvsr", font=sub_font, fill=ink)
+    _finish(canvas, out_path)
+
+
+def _result_color(result: str) -> tuple[int, int, int, int]:
+    if result == "win":
+        return WIN
+    if result == "loss":
+        return LOSS
+    return TEXT
+
+
+def _delta_color(delta: str, result: str) -> tuple[int, int, int, int]:
+    if not delta or delta == "—":
+        return MUTED
+    if delta.startswith("+"):
+        return WIN
+    if delta[:1] in {"-", "−", "–"}:
+        return LOSS
+    return _result_color(result)
+
+
+def render_recent(
+    rows: list,
+    out_path: str,
+    title: str,
+    subtitle: str,
+    portraits: dict[str, Image.Image],
+    rank_icons: dict[str, Image.Image],
+    sky: Optional[Image.Image] = None,
+    character_zh=None,
+    rank_zh=None,
+    updated: str = "",
+) -> None:
+    row_h = _p(56)
+    height = _p(118) + row_h * max(1, len(rows)) + _p(42)
+    canvas = _prepare(_WIDTH, height, sky)
+    y = _header(canvas, title, subtitle)
+    draw = ImageDraw.Draw(canvas)
+    time_font = _font(_p(13), _YAHEI, _SEGOE)
+    body_font = _font(_p(15), _YAHEI, _SEGOE)
+    small_font = _font(_p(12), _YAHEI, _SEGOE)
+    score_font = _font(_p(16), _SEGOE_BD, _YAHEI_BD)
+    delta_font = _font(_p(15), _SEGOE_BD, _YAHEI_BD)
+    icon = _p(34)
+    for index, row in enumerate(rows):
+        if index % 2 == 0:
+            draw.rectangle((_p(16), y, _WIDTH - _p(16), y + row_h - _p(6)), fill=(18, 40, 60, 210))
+        played = (row.played_at or "").split(" ", 1)
+        date = played[0] if played and played[0] else "—"
+        clock = played[1] if len(played) > 1 else ""
+        draw.text((_p(24), y + _p(8)), date, font=time_font, fill=MUTED)
+        if clock:
+            draw.text((_p(24), y + _p(28)), clock, font=time_font, fill=MUTED)
+        portrait = portraits.get(row.portrait_url)
+        if portrait is not None:
+            _paste(canvas, _circle(portrait, icon), (_p(118), y + _p(8)))
+        name_font = font_for(_p(16), row.opponent or "", bold=True)
+        name = _ellipsis(draw, row.opponent or "—", name_font, _p(168))
+        draw.text((_p(160), y + _p(6)), name, font=name_font, fill=TEXT)
+        if row.platform:
+            draw.text((_p(160), y + _p(28)), row.platform, font=small_font, fill=MUTED)
+        character = character_zh(row.character) if character_zh else row.character
+        draw.text(
+            (_p(340), y + _p(16)),
+            _ellipsis(draw, character or "—", body_font, _p(130)),
+            font=body_font,
+            fill=TEXT,
+        )
+        rank_icon = rank_icons.get(row.rank_icon_url)
+        rank_x = _p(478)
+        if rank_icon is not None:
+            _paste(
+                canvas,
+                rank_icon.convert("RGBA").resize((icon, icon), Image.Resampling.LANCZOS),
+                (_p(476), y + _p(8)),
+            )
+            rank_x = _p(516)
+        rank_name = rank_zh(row.rank) if rank_zh else row.rank
+        draw.text(
+            (rank_x, y + _p(6)),
+            _ellipsis(draw, rank_name or "—", body_font, _p(130)),
+            font=body_font,
+            fill=GOLD,
+        )
+        points = row.points or ""
+        if points and row.unit:
+            points = f"{points} {row.unit}"
+        if points:
+            draw.text((rank_x, y + _p(28)), points, font=small_font, fill=MUTED)
+        score = row.score or "—"
+        score_color = _result_color(row.result)
+        score_w = _text_size(draw, score, score_font)[0]
+        draw.text((_p(748) - score_w, y + _p(14)), score, font=score_font, fill=score_color)
+        delta = row.delta or "—"
+        delta_w = _text_size(draw, delta, delta_font)[0]
+        draw.text(
+            (_WIDTH - _p(24) - delta_w, y + _p(15)),
+            delta,
+            font=delta_font,
+            fill=_delta_color(delta, row.result),
+        )
+        y += row_h
+    _footer(canvas, y + _p(4), updated)
     _finish(canvas, out_path)

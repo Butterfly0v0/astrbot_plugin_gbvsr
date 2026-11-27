@@ -38,11 +38,15 @@ COMMANDS = (
     "gbvsr排行榜",
     "gbvsr排行",
     "gbvsr总体胜率",
+    "gbvsr最近对局",
     "gbvsr使用率",
+    "gbvsr对局",
     "gbvsr胜率",
     "gbvsr",
 )
 _BOARD_LIMIT = 50
+_RECENT_DEFAULT = 4
+_RECENT_LIMIT = 20
 _SEASON_RE = re.compile(r"^(?:第)?(\d+)赛季$|^赛季(\d+)$|^season(\d+)$", re.IGNORECASE)
 _PLAYER_QUERY_RE = re.compile(r"^(\d{10,})(?:\s+(.+))?$")
 
@@ -84,6 +88,7 @@ render_card = _card.render_card
 render_leaderboard = _board.render_leaderboard
 render_rates = _board.render_rates
 render_usage = _board.render_usage
+render_recent = _board.render_recent
 render_matrix = _board.render_matrix
 
 
@@ -182,7 +187,7 @@ def _cleanup_files(
     "astrbot_plugin_gbvsr",
     "Butterfly0v0",
     "查询 puddle.farm 上的 GBVSR 玩家段位",
-    "0.2.5",
+    "0.2.6",
 )
 class GbvsrRankPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
@@ -481,6 +486,7 @@ class GbvsrRankPlugin(Star):
             rank_icon=rank_icon,
             sky=sky,
             alts=alt_images,
+            updated=profile.updated,
         )
         await asyncio.to_thread(render_card, card, out_path)
         self._sweep_temp_files()
@@ -585,6 +591,8 @@ class GbvsrRankPlugin(Star):
                 "按网站的总体胜率表发送图片",
                 "gbvsr使用率",
                 "近 30 天排位的角色出场占比",
+                "gbvsr对局 [玩家名或ID] [角色] [数量]",
+                "默认 4 组，最多 20。例如 gbvsr对局 gamera 10",
                 "gbvsr帮助",
                 "",
                 "数据来自 puddle.farm，段位和立绘以该站页面为准。",
@@ -619,6 +627,9 @@ class GbvsrRankPlugin(Star):
                     yield result
             elif cmd == "gbvsr使用率":
                 async for result in self._handle_usage(event):
+                    yield result
+            elif cmd in {"gbvsr对局", "gbvsr最近对局"}:
+                async for result in self._handle_recent(event, args):
                     yield result
             elif cmd == "gbvsr胜率":
                 async for result in self._handle_rates(event, args):
@@ -678,6 +689,118 @@ class GbvsrRankPlugin(Star):
         prefix = f"已绑定 {profile.name}"
         async for result in self._send_card(event, profile, prefix):
             yield result
+
+    async def _handle_recent(self, event: AstrMessageEvent, args: str):
+        if self._cooling_down(event):
+            yield event.plain_result("查询有点频繁，请稍后再试。")
+            return
+        query, limit, clamped, explicit = self._parse_recent_args(args)
+        if not query:
+            sender = self._sender_id(event)
+            stored = self._load_bindings().get(sender) if sender else None
+            if not isinstance(stored, dict) or not stored.get("player_id"):
+                yield event.plain_result(
+                    "用法：gbvsr对局 <玩家名或ID> [角色] [数量]\n"
+                    "默认 4 组，最多 20。例如 gbvsr对局 gamera 10"
+                )
+                return
+            query = str(stored["player_id"])
+        self._mark_query(event)
+        profile, message = await self._resolve_query(query)
+        if message and profile is None:
+            yield event.plain_result(message)
+            return
+        if profile is None:
+            yield event.plain_result("没有找到这个玩家。")
+            return
+        shown, short = await self._collect_recent(profile, limit)
+        if not shown:
+            yield event.plain_result("没有读到最近对局。")
+            return
+        portraits = await self._images_by_url(
+            [row.portrait_url for row in shown] + [profile.sky_url]
+        )
+        icons = await self._images_by_url([row.rank_icon_url for row in shown])
+        character = character_zh(profile.character) if profile.character else ""
+        bits = [profile.name]
+        if profile.platform:
+            bits.append(profile.platform)
+        if character:
+            bits.append(character)
+        bits.append(f"{len(shown)}组")
+        subtitle = " · ".join(bits)
+        out_path = os.path.join(
+            self.card_dir,
+            f"recent_{profile.player_id}_{profile.character_id or 'now'}_{int(time.time() * 1000)}.png",
+        )
+        await asyncio.to_thread(
+            render_recent,
+            shown,
+            out_path,
+            "最近对局",
+            subtitle,
+            portraits,
+            icons,
+            portraits.get(profile.sky_url),
+            character_zh,
+            rank_zh,
+            profile.updated,
+        )
+        self._sweep_temp_files()
+        notes: list[str] = []
+        if any(row.partial for row in shown):
+            notes.append("带 * 的积分还没记全。")
+        if clamped:
+            notes.append(f"最多显示 {_RECENT_LIMIT} 组。")
+        if explicit and short:
+            notes.append(f"只有这 {len(shown)} 组。")
+        async for result in self._send_image(event, out_path, "".join(notes)):
+            yield result
+
+    def _parse_recent_args(self, args: str) -> tuple[str, int, bool, bool]:
+        parts: list[str] = []
+        limit = _RECENT_DEFAULT
+        explicit = False
+        clamped = False
+        for token in args.split():
+            if not explicit and token.isdigit() and len(token) <= 3:
+                limit = int(token)
+                explicit = True
+                continue
+            parts.append(token)
+        if limit < 1:
+            limit = 1
+        if limit > _RECENT_LIMIT:
+            limit = _RECENT_LIMIT
+            clamped = True
+        return " ".join(parts), limit, clamped, explicit
+
+    async def _collect_recent(self, profile: PlayerProfile, limit: int) -> tuple[list, bool]:
+        shown = list(profile.recent)
+        older = profile.recent_older_url
+        seen_urls = set()
+        while len(shown) < limit and older and older not in seen_urls:
+            seen_urls.add(older)
+            try:
+                page, older = await self.client.older_recent(older)
+            except PuddleError:
+                break
+            if not page:
+                break
+            known = {
+                (row.played_at, row.opponent, row.character, row.score, row.delta)
+                for row in shown
+            }
+            fresh = [
+                row
+                for row in page
+                if (row.played_at, row.opponent, row.character, row.score, row.delta) not in known
+            ]
+            if not fresh:
+                break
+            shown.extend(fresh)
+        short = len(shown) < limit
+        return shown[:limit], short
 
     async def _handle_query(self, event: AstrMessageEvent, args: str):
         if self._cooling_down(event):
@@ -778,10 +901,12 @@ class GbvsrRankPlugin(Star):
         cache_key = f"board:{character_key}:{season}"
         cached = self._cache_get(cache_key)
         if cached is None:
-            rows, current_season, sky_url = await self.client.leaderboard(character_key, season)
-            cached = (rows, current_season, sky_url)
+            rows, current_season, sky_url, updated = await self.client.leaderboard(
+                character_key, season
+            )
+            cached = (rows, current_season, sky_url, updated)
             self._cache_set(cache_key, cached)
-        rows, current_season, sky_url = cached
+        rows, current_season, sky_url, updated = cached
         shown = list(rows[:limit])
         if not shown:
             yield event.plain_result("这个排行榜还没有玩家。")
@@ -808,6 +933,7 @@ class GbvsrRankPlugin(Star):
             portraits.get(sky_url),
             character_zh,
             rank_zh,
+            updated,
         )
         self._sweep_temp_files()
         note = f"最多显示前 {_BOARD_LIMIT} 名。" if clamped else ""
@@ -837,6 +963,7 @@ class GbvsrRankPlugin(Star):
             f"行对列 · {cohort_label} · 近30天排位",
             portraits,
             character_zh,
+            matrix.updated,
         )
         self._sweep_temp_files()
         async for result in self._send_image(event, out_path):
@@ -849,10 +976,10 @@ class GbvsrRankPlugin(Star):
         self._mark_query(event)
         cached = self._cache_get("usage")
         if cached is None:
-            rows, sky_url = await self.client.popularity()
-            cached = (rows, sky_url)
+            rows, sky_url, updated = await self.client.popularity()
+            cached = (rows, sky_url, updated)
             self._cache_set("usage", cached)
-        rows, sky_url = cached
+        rows, sky_url, updated = cached
         if not rows:
             yield event.plain_result("没有读到角色使用率。")
             return
@@ -869,6 +996,7 @@ class GbvsrRankPlugin(Star):
             portraits,
             portraits.get(sky_url),
             character_zh,
+            updated,
         )
         self._sweep_temp_files()
         async for result in self._send_image(event, out_path):
@@ -883,10 +1011,10 @@ class GbvsrRankPlugin(Star):
         cache_key = f"overall:{cohort}"
         cached = self._cache_get(cache_key)
         if cached is None:
-            rows, current, sky_url = await self.client.overall_rates(cohort)
-            cached = (rows, current, sky_url)
+            rows, current, sky_url, updated = await self.client.overall_rates(cohort)
+            cached = (rows, current, sky_url, updated)
             self._cache_set(cache_key, cached)
-        rows, current, sky_url = cached
+        rows, current, sky_url, updated = cached
         if not rows:
             yield event.plain_result("没有读到总体胜率。")
             return
@@ -908,6 +1036,7 @@ class GbvsrRankPlugin(Star):
             portraits.get(sky_url),
             character_zh,
             False,
+            updated,
         )
         self._sweep_temp_files()
         async for result in self._send_image(event, out_path):
@@ -967,6 +1096,7 @@ class GbvsrRankPlugin(Star):
             portraits.get(report.sky_url),
             character_zh,
             True,
+            report.updated,
         )
         self._sweep_temp_files()
         async for result in self._send_image(event, out_path):

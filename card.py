@@ -55,6 +55,7 @@ class CardData:
     rank_icon: Optional[Image.Image] = None
     sky: Optional[Image.Image] = None
     alts: list[Image.Image] = field(default_factory=list)
+    updated: str = ""
 
 
 def open_image(data: bytes) -> Image.Image:
@@ -93,12 +94,26 @@ def _fit_font(
     return font
 
 
+def _has_hangul(text: str) -> bool:
+    return any("\uac00" <= ch <= "\ud7a3" for ch in text)
+
+
+def _font_paths(text: str, bold: bool) -> tuple[str, ...]:
+    if _has_hangul(text):
+        if bold:
+            return (_MALGUN_BD, _MALGUN, _YAHEI_BD, _YAHEI, _SEGOE_BD)
+        return (_MALGUN, _MALGUN_BD, _YAHEI, _SEGOE)
+    if any(ord(ch) > 127 for ch in text):
+        return (_YAHEI_BD, _YAHEI, _SEGOE_BD) if bold else (_YAHEI, _SEGOE)
+    return (_SEGOE_BD, _YAHEI_BD, _SEGOE) if bold else (_SEGOE, _YAHEI)
+
+
+def font_for(size: int, text: str, *, bold: bool = False) -> ImageFont.ImageFont:
+    return _font(size, *_font_paths(text, bold))
+
+
 def _name_fonts(name: str) -> tuple[str, ...]:
-    if any("\uac00" <= ch <= "\ud7a3" for ch in name):
-        return (_MALGUN_BD, _MALGUN, _YAHEI_BD, _YAHEI, _SEGOE_BD)
-    if any(ord(ch) > 127 for ch in name):
-        return (_YAHEI_BD, _YAHEI, _SEGOE_BD)
-    return (_SEGOE_BD, _YAHEI_BD, _SEGOE)
+    return _font_paths(name, True)
 
 
 def _paste(base: Image.Image, image: Image.Image, xy: tuple[int, int]) -> None:
@@ -313,7 +328,6 @@ def render_card(data: CardData, out_path: str) -> None:
     f_stat = _font(_u(24), _SEGOE_BD, _YAHEI_BD, _SEGOE)
     f_label = _font(_u(14), _YAHEI, _SEGOE)
     f_small = _font(_u(16), _YAHEI, _SEGOE)
-    f_foot = _font(_u(13), _SEGOE, _YAHEI)
 
     x0 = _u(28)
     kicker = "GRANBLUE FANTASY VERSUS: RISING"
@@ -441,7 +455,13 @@ def render_card(data: CardData, out_path: str) -> None:
         if hidden > 0:
             draw.text((icon_x + _u(2), other_y + _u(5)), f"+{hidden}", font=f_small, fill=MUTED)
 
-    draw.text((x0, H - _u(26)), "puddle.farm/gbvsr", font=f_foot, fill=(110, 132, 150, 255))
+    foot_font = _font(_u(13), _YAHEI, _SEGOE)
+    foot = f"数据更新 {data.updated}" if data.updated else "puddle.farm/gbvsr"
+    draw.text((x0, H - _u(26)), foot, font=foot_font, fill=(110, 132, 150, 255))
+    if data.updated:
+        credit = "puddle.farm/gbvsr"
+        gap = _text_size(draw, foot, foot_font)[0] + _u(18)
+        draw.text((x0 + gap, H - _u(26)), credit, font=foot_font, fill=(110, 132, 150, 255))
 
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     rgb = Image.new("RGB", canvas.size, (14, 26, 40))

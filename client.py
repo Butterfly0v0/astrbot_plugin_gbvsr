@@ -8,21 +8,40 @@ from __future__ import annotations
 
 import asyncio
 import html
+import importlib.util
 import logging
 import os
 import re
 import sys
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from urllib.parse import urljoin
 
 import aiohttp
 
-_PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
-if _PLUGIN_DIR not in sys.path:
-    sys.path.insert(0, _PLUGIN_DIR)
 
-from names import resolve_character
+def _load_names():
+    """Load this plugin's names.py by path.
+
+    A bare ``import names`` stays in sys.modules across AstrBot reloads, so
+    alias updates never reached the player lookup. The chat reply uses the
+    freshly loaded module and would name a character the lookup could not see.
+    """
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "names.py")
+    full_name = "astrbot_plugin_gbvsr.names"
+    spec = importlib.util.spec_from_file_location(full_name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"无法加载角色名表: {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[full_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_names = _load_names()
+resolve_character = _names.resolve_character
+character_id = _names.character_id
 
 logger = logging.getLogger("astrbot_plugin_gbvsr")
 
@@ -141,6 +160,7 @@ class MatchupReport:
     matchups: list[MatchupRow]
     overall: list[RateRow]
     sky_url: str
+    updated: str = ""
 
 
 @dataclass
@@ -161,6 +181,24 @@ class MatchupMatrix:
     columns: list[MatrixSlot]
     rows: list[tuple[MatrixSlot, list[MatrixCell]]]
     cohort: str
+    updated: str = ""
+
+
+@dataclass
+class RecentSet:
+    played_at: str
+    opponent: str
+    platform: str
+    character: str
+    portrait_url: str
+    rank: str
+    rank_icon_url: str
+    points: str
+    unit: str
+    score: str
+    result: str
+    delta: str
+    partial: bool = False
 
 
 @dataclass
@@ -183,8 +221,11 @@ class PlayerProfile:
     rank_icon_url: str
     sky_url: str
     page_url: str
+    updated: str = ""
     rating_unit: str = "MP"
     characters: list[CharacterSlot] = field(default_factory=list)
+    recent: list[RecentSet] = field(default_factory=list)
+    recent_older_url: str = ""
 
     @property
     def others(self) -> list[CharacterSlot]:
@@ -287,6 +328,34 @@ def _parse_characters(page_html: str) -> list[CharacterSlot]:
     return slots
 
 
+_CST = timezone(timedelta(hours=8))
+
+
+def format_updated(raw: str) -> str:
+    text = raw.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        moment = datetime.fromisoformat(text)
+    except ValueError:
+        return ""
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    local = moment.astimezone(_CST)
+    return f"{local.month}月{local.day}日 {local.hour:02d}:{local.minute:02d}"
+
+
+def page_updated(page_html: str, kind: str) -> str:
+    if kind == "board":
+        pattern = r'class="leaderboard-updated">.*?<time\b[^>]*\bdateTime="([^"]+)"'
+    elif kind == "player":
+        pattern = r'Snapshot(?:<!--\s*-->)?\s*<time\b[^>]*\bdateTime="([^"]+)"'
+    else:
+        pattern = r'Updated(?:<!--\s*-->)?\s*<time\b[^>]*\bdateTime="([^"]+)"'
+    match = re.search(pattern, page_html, re.IGNORECASE | re.DOTALL)
+    return format_updated(match.group(1)) if match else ""
+
+
 def _sky_url(page_html: str) -> str:
     match = _SKY_RE.search(page_html)
     if match:
@@ -304,6 +373,147 @@ def _rank_icon_url(page_html: str, rank: str) -> str:
         if alt == rank and "rank-" in src:
             return absolute_url(src)
     return ""
+
+
+_RECENT_SECTION_RE = re.compile(
+    r'<section\b[^>]*aria-labelledby="recent-matches-title"[^>]*>(.*?)</section>',
+    re.IGNORECASE | re.DOTALL,
+)
+_MATCH_GROUP_RE = re.compile(
+    r'<details\b[^>]*class="[^"]*\bmatch-group\b[^"]*"[^>]*>(.*?)</details>',
+    re.IGNORECASE | re.DOTALL,
+)
+_SCORE_RE = re.compile(
+    r'class="match-group-score([^"]*)">(.*?)</span>',
+    re.IGNORECASE | re.DOTALL,
+)
+_DELTA_RE = re.compile(
+    r'class="rating-change([^"]*)"[^>]*>(.*?)</span>',
+    re.IGNORECASE | re.DOTALL,
+)
+_POINTS_RE = re.compile(
+    r'([\d,]+)\s*(?:<!--.*?-->)?\s*<small class="muted">(MP|RP)</small>',
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _score_text(raw: str) -> str:
+    text = _clean_text(raw)
+    return re.sub(r"\s*[–—-]\s*", "–", text)
+
+
+def _delta_text(raw: str) -> tuple[str, bool]:
+    text = _clean_text(raw).replace(" *", "*")
+    partial = "partial recorded change" in raw.lower() or text.endswith("*")
+    if partial and text and not text.endswith("*"):
+        text += "*"
+    if not text or text in {"-", "—", "–"}:
+        return "—", False
+    return text, partial
+
+
+def _set_result(score_class: str) -> str:
+    if "result-loss" in score_class:
+        return "loss"
+    if "result-win" in score_class:
+        return "win"
+    return ""
+
+
+def _fill_templates(fragment: str, blocks: dict[str, str], seen: set[str] | None = None) -> str:
+    """Splice streamed Next.js blocks into empty suspense templates.
+
+    Later match pages leave the groups in a hidden block, and the rank,
+    time, and point cells inside that block are templates of their own.
+    """
+    seen = set() if seen is None else seen
+
+    def replace(match: re.Match[str]) -> str:
+        key = match.group(1)
+        if key in seen:
+            return match.group(0)
+        content = blocks.get(f"S:{key}", "")
+        if not content or "recent-matches-title" in content:
+            return match.group(0)
+        seen.add(key)
+        if "<template" in content:
+            content = _fill_templates(content, blocks, seen)
+        return content
+
+    return re.sub(r'<template id="[A-Z]:([^"]*)">\s*</template>', replace, fragment)
+
+
+def recent_older_url(page_html: str) -> str:
+    section = _RECENT_SECTION_RE.search(page_html)
+    if not section:
+        return ""
+    nav = re.search(
+        r'<nav\b[^>]*aria-label="Match history pages"[^>]*>(.*?)</nav>',
+        section.group(0),
+        re.IGNORECASE | re.DOTALL,
+    )
+    if not nav:
+        return ""
+    for attrs, text in re.findall(r"<a\b([^>]*)>(.*?)</a>", nav.group(1), re.IGNORECASE | re.DOTALL):
+        if "Older" not in _clean_text(text):
+            continue
+        href = html.unescape(_attr(attrs, "href"))
+        return absolute_url(href)
+    return ""
+
+
+def parse_recent_matches(page_html: str) -> list[RecentSet]:
+    section = _RECENT_SECTION_RE.search(page_html)
+    if not section:
+        return []
+    fragment = section.group(1)
+    if "<template" in fragment:
+        fragment = _fill_templates(fragment, _hidden_blocks(page_html))
+    sets: list[RecentSet] = []
+    for group in _MATCH_GROUP_RE.findall(fragment):
+        summary = re.search(r"<summary\b[^>]*>(.*?)</summary>", group, re.IGNORECASE | re.DOTALL)
+        fragment = summary.group(1) if summary else group
+        when = re.search(r'<time\b[^>]*\bdateTime="([^"]+)"', fragment, re.IGNORECASE)
+        name = re.search(r'class="player-link"[^>]*>([^<]*)', fragment, re.IGNORECASE)
+        platform = re.search(r'class="platform">([^<]*)', fragment, re.IGNORECASE)
+        character = re.search(r"<small>([^<]*)</small>", fragment, re.IGNORECASE)
+        rank = re.search(
+            r'class="rank-icon-label"\s+title="([^"]+)"',
+            fragment,
+            re.IGNORECASE,
+        )
+        rank_icon = ""
+        for attrs in _IMG_RE.findall(fragment):
+            src = _attr(attrs, "src")
+            if "rank-" in src:
+                rank_icon = absolute_url(src)
+                break
+        points = _POINTS_RE.search(fragment)
+        score = _SCORE_RE.search(fragment)
+        delta = _DELTA_RE.search(fragment)
+        opponent = _clean_text(name.group(1)) if name else ""
+        score_text = _score_text(score.group(2)) if score else ""
+        if not opponent and not score_text:
+            continue
+        delta_text, partial = _delta_text(delta.group(2) if delta else "")
+        sets.append(
+            RecentSet(
+                played_at=format_updated(when.group(1)) if when else "",
+                opponent=opponent,
+                platform=_clean_text(platform.group(1)) if platform else "",
+                character=_clean_text(character.group(1)) if character else "",
+                portrait_url=_row_portrait(fragment),
+                rank=html.unescape(rank.group(1)) if rank else "",
+                rank_icon_url=rank_icon,
+                points=_format_mp(points.group(1)) if points else "",
+                unit=points.group(2).upper() if points else "",
+                score=score_text,
+                result=_set_result(score.group(1) if score else ""),
+                delta=delta_text,
+                partial=partial,
+            )
+        )
+    return sets
 
 
 def parse_player(page_html: str, player_id: str) -> PlayerProfile:
@@ -368,7 +578,10 @@ def parse_player(page_html: str, player_id: str) -> PlayerProfile:
         rank_icon_url=_rank_icon_url(page_html, rank),
         sky_url=_sky_url(page_html),
         page_url=page_url,
+        updated=page_updated(page_html, "player"),
         characters=characters,
+        recent=parse_recent_matches(page_html),
+        recent_older_url=recent_older_url(page_html),
     )
 
 
@@ -427,7 +640,48 @@ def _row_numbers(row_html: str, character: str) -> list[str]:
     return [cell for cell in cells if cell and cell != character]
 
 
+def _hidden_blocks(page_html: str) -> dict[str, str]:
+    """Map Next.js suspense ids (S:…) to the HTML streamed after the first rows."""
+    blocks: dict[str, str] = {}
+    for match in re.finditer(r'<div hidden id="(S:[^"]+)">', page_html):
+        start = match.end()
+        depth = 1
+        index = start
+        while index < len(page_html) and depth:
+            next_open = page_html.find("<div", index)
+            next_close = page_html.find("</div>", index)
+            if next_close < 0:
+                break
+            if 0 <= next_open < next_close:
+                depth += 1
+                index = next_open + 4
+            else:
+                depth -= 1
+                if depth == 0:
+                    blocks[match.group(1)] = page_html[start:next_close]
+                    break
+                index = next_close + 6
+    return blocks
+
+
+def _inline_templates(page_html: str) -> str:
+    blocks = _hidden_blocks(page_html)
+    if not blocks:
+        return page_html
+
+    def replace(match: re.Match[str]) -> str:
+        content = blocks.get(f"S:{match.group(1)}", "")
+        # The first suspense block wraps the whole page. Inlining it would
+        # copy the table, including the still-empty placeholders.
+        if not content or "<tr" in content or "<template" in content:
+            return match.group(0)
+        return content
+
+    return re.sub(r'<template id="[A-Z]:([^"]*)"></template>', replace, page_html)
+
+
 def parse_leaderboard(page_html: str) -> list[BoardRow]:
+    page_html = _inline_templates(page_html)
     rows: list[BoardRow] = []
     for row_html in re.findall(r"<tr\b[^>]*>(.*?)</tr>", page_html, re.IGNORECASE | re.DOTALL):
         position = re.search(r'class="position">(\d+)<', row_html)
@@ -566,6 +820,7 @@ def parse_matchup_page(page_html: str) -> MatchupReport:
         matchups=matchups,
         overall=overall,
         sky_url=_sky_url(page_html),
+        updated=page_updated(page_html, "rates"),
     )
 
 
@@ -631,7 +886,12 @@ def parse_matchup_matrix(page_html: str) -> MatchupMatrix:
         rows.append((_matrix_slot(head.group(1), head.group(2)), cells))
     if not columns or len(rows) != len(columns):
         raise PuddleError("角色对位表暂时解析不了。")
-    return MatchupMatrix(columns=columns, rows=rows, cohort=selected_cohort(page_html))
+    return MatchupMatrix(
+        columns=columns,
+        rows=rows,
+        cohort=selected_cohort(page_html),
+        updated=page_updated(page_html, "rates"),
+    )
 
 
 def pick_character(slots: list[CharacterSlot], query: str) -> Optional[CharacterSlot]:
@@ -641,8 +901,11 @@ def pick_character(slots: list[CharacterSlot], query: str) -> Optional[Character
     english = resolve_character(query)
     if english:
         target = english.casefold()
+        target_id = character_id(query)
         for slot in slots:
-            if slot.name.casefold() == target:
+            if target_id and slot.character_id == target_id:
+                return slot
+            if slot.name.casefold() == target or resolve_character(slot.name) == english:
                 return slot
         return None
     exact = [slot for slot in slots if slot.name.casefold() == needle]
@@ -714,6 +977,10 @@ class PuddleClient:
             logger.warning("玩家页解析失败: %s", url)
             raise
 
+    async def older_recent(self, url: str) -> tuple[list[RecentSet], str]:
+        page = await self._get_html(url)
+        return parse_recent_matches(page), recent_older_url(page)
+
     async def read_bytes(self, urls: list[str]) -> list[Optional[bytes]]:
         if not urls:
             return []
@@ -769,7 +1036,12 @@ class PuddleClient:
         if season and seasons and season not in seasons:
             shown = "、".join(f"第{item}赛季" for item in seasons)
             raise PuddleError(f"没有第{season}赛季的排行榜。现有：{shown}。")
-        return parse_leaderboard(page), selected_season(page) or season, _sky_url(page)
+        return (
+            parse_leaderboard(page),
+            selected_season(page) or season,
+            _sky_url(page),
+            page_updated(page, "board"),
+        )
 
     async def matchups(self, character_id: str, cohort: str = "all") -> MatchupReport:
         if cohort not in {"all", "master"}:
@@ -785,13 +1057,18 @@ class PuddleClient:
 
     async def popularity(self) -> tuple[list[UsageRow], str]:
         page = await self._get_html(f"{BASE_URL}/popularity")
-        return parse_popularity(page), _sky_url(page)
+        return parse_popularity(page), _sky_url(page), page_updated(page, "rates")
 
     async def overall_rates(self, cohort: str = "all") -> tuple[list[RateRow], str, str]:
         if cohort not in {"all", "master"}:
             cohort = "all"
         page = await self._get_html(f"{BASE_URL}/matchups", {"cohort": cohort})
-        return parse_overall_rates(page), selected_cohort(page) or cohort, _sky_url(page)
+        return (
+            parse_overall_rates(page),
+            selected_cohort(page) or cohort,
+            _sky_url(page),
+            page_updated(page, "rates"),
+        )
 
     async def matchup_matrix(self, cohort: str = "all") -> MatchupMatrix:
         if cohort not in {"all", "master"}:
