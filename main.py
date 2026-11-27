@@ -65,6 +65,9 @@ def _load_local_module(module_name: str):
     module = importlib.util.module_from_spec(spec)
     sys.modules[full_name] = module
     spec.loader.exec_module(module)
+    # Bare imports such as ``card`` survive a plugin reload. Point them at
+    # the module just executed so the next import does not keep the old one.
+    sys.modules[module_name] = module
     return module
 
 
@@ -187,7 +190,7 @@ def _cleanup_files(
     "astrbot_plugin_gbvsr",
     "Butterfly0v0",
     "查询 puddle.farm 上的 GBVSR 玩家段位",
-    "0.2.6",
+    "0.2.7",
 )
 class GbvsrRankPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):

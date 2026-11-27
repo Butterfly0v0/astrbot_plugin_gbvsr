@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import sys
 from typing import Optional
@@ -9,28 +10,45 @@ from typing import Optional
 from PIL import Image, ImageDraw
 
 _DIR = os.path.dirname(os.path.abspath(__file__))
-if _DIR not in sys.path:
-    sys.path.insert(0, _DIR)
 
-from card import (  # noqa: E402
-    BG,
-    GOLD,
-    LOSS,
-    MUTED,
-    TEXT,
-    WIN,
-    _SEGOE,
-    _SEGOE_BD,
-    _YAHEI,
-    _YAHEI_BD,
-    _aa_disc,
-    _circle,
-    _font,
-    font_for,
-    _paste,
-    _paste_sky,
-    _text_size,
-)
+
+def _load_card():
+    """Load this plugin's card.py by path.
+
+    A bare ``import card`` stays in sys.modules for the whole AstrBot
+    process. After an update, reload would keep the old module and fail
+    with ``cannot import name 'font_for'``.
+    """
+    path = os.path.join(_DIR, "card.py")
+    full_name = "astrbot_plugin_gbvsr.card"
+    spec = importlib.util.spec_from_file_location(full_name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"无法加载资料卡模块: {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[full_name] = module
+    spec.loader.exec_module(module)
+    sys.modules["card"] = module
+    return module
+
+
+_card = _load_card()
+BG = _card.BG
+GOLD = _card.GOLD
+LOSS = _card.LOSS
+MUTED = _card.MUTED
+TEXT = _card.TEXT
+WIN = _card.WIN
+_SEGOE = _card._SEGOE
+_SEGOE_BD = _card._SEGOE_BD
+_YAHEI = _card._YAHEI
+_YAHEI_BD = _card._YAHEI_BD
+_aa_disc = _card._aa_disc
+_circle = _card._circle
+_font = _card._font
+font_for = _card.font_for
+_paste = _card._paste
+_paste_sky = _card._paste_sky
+_text_size = _card._text_size
 
 _SCALE = 2
 

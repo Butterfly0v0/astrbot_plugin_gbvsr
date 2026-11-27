@@ -4,6 +4,12 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [v0.2.7] - 2026-11-27
+
+### Fixed
+
+- 更新插件后重载，不再因为进程里残留的旧模块而报 `cannot import name 'font_for'`
+
 ## [v0.2.6] - 2026-11-27
 
 ### Added
