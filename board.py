@@ -461,7 +461,9 @@ def render_recent(
     updated: str = "",
 ) -> None:
     row_h = _p(56)
-    height = _p(118) + row_h * max(1, len(rows)) + _p(42)
+    partial = any(getattr(row, "partial", False) for row in rows)
+    note_h = _p(22) if partial else 0
+    height = _p(118) + row_h * max(1, len(rows)) + note_h + _p(42)
     canvas = _prepare(_WIDTH, height, sky)
     y = _header(canvas, title, subtitle)
     draw = ImageDraw.Draw(canvas)
@@ -529,5 +531,9 @@ def render_recent(
             fill=_delta_color(delta, row.result),
         )
         y += row_h
+    if partial:
+        note_font = _font(_p(12), _YAHEI, _SEGOE)
+        draw.text((_p(28), y + _p(2)), "带 * 的积分还没记全。", font=note_font, fill=MUTED)
+        y += note_h
     _footer(canvas, y + _p(4), updated)
     _finish(canvas, out_path)

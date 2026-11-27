@@ -4,6 +4,12 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [v0.2.8] - 2026-11-27
+
+### Changed
+
+- 最近对局里「带 * 的积分还没记全」改画在图片上，不再另发一条文字
+
 ## [v0.2.7] - 2026-11-27
 
 ### Fixed

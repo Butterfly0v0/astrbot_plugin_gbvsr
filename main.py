@@ -190,7 +190,7 @@ def _cleanup_files(
     "astrbot_plugin_gbvsr",
     "Butterfly0v0",
     "查询 puddle.farm 上的 GBVSR 玩家段位",
-    "0.2.7",
+    "0.2.8",
 )
 class GbvsrRankPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
@@ -751,8 +751,6 @@ class GbvsrRankPlugin(Star):
         )
         self._sweep_temp_files()
         notes: list[str] = []
-        if any(row.partial for row in shown):
-            notes.append("带 * 的积分还没记全。")
         if clamped:
             notes.append(f"最多显示 {_RECENT_LIMIT} 组。")
         if explicit and short:
